@@ -15,6 +15,12 @@ export class Input {
   /** Raw key codes pressed this frame, for cheat-code capture and menus. */
   readonly typed: string[] = [];
 
+  /** Pointer position in VIEW-space canvas pixels, or -1 before any move. */
+  mouseX = -1;
+  mouseY = -1;
+  private mouseWasDown = false;
+  private mouseClickedFlag = false;
+
   constructor(target: EventTarget = window) {
     target.addEventListener('keydown', (e) => {
       const ev = e as KeyboardEvent;
@@ -38,11 +44,27 @@ export class Input {
   justPressed(b: Btn): boolean { return this.pressed.has(b); }
 
   /** Call once at the end of each fixed update. */
-  endFrame(): void { this.pressed.clear(); this.typed.length = 0; }
+  endFrame(): void {
+    this.pressed.clear();
+    this.typed.length = 0;
+    this.mouseClickedFlag = false;
+  }
 
   /** Touch/virtual button support for the mobile build. */
   setVirtual(b: Btn, on: boolean): void {
     if (on) { if (!this.down.has(b)) this.pressed.add(b); this.down.add(b); }
     else this.down.delete(b);
   }
+
+  // -------------------------------------------------------------- pointer
+  /** Called from main.ts with coordinates already mapped into VIEW space. */
+  setMousePos(x: number, y: number): void { this.mouseX = x; this.mouseY = y; }
+
+  setMouseDown(down: boolean): void {
+    if (down && !this.mouseWasDown) this.mouseClickedFlag = true;
+    this.mouseWasDown = down;
+  }
+
+  /** True on the single frame a click (mousedown edge) is consumed. */
+  mouseClicked(): boolean { return this.mouseClickedFlag; }
 }

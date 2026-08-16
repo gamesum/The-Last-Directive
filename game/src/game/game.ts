@@ -72,6 +72,8 @@ export class Game {
   /** The transmission currently held on screen, if any. */
   private pending: Transmission | null = null;
   private pendingT = 0;
+  /** Mouse-clickable regions registered by the current frame's menu draw. */
+  private clickTargets: { x: number; y: number; w: number; h: number; run: () => void }[] = [];
   private firedTransmissions = new Set<number>();
 
   private intro: Intro | null = null;
@@ -181,22 +183,29 @@ export class Game {
 
     if (this.screen === 'transmission') {
       this.pendingT += 1000 / FPS;
-      // Brief lockout so a keypress already in flight cannot skip the line
-      // the instant it appears.
-      if (this.pendingT > 350 && (i.justPressed('confirm') || i.justPressed('cancel'))) {
+      // Brief lockout so a keypress (or a click) already in flight cannot
+      // skip the line the instant it appears. Clicking anywhere dismisses,
+      // same as a modal dialog.
+      const clickDismiss = i.mouseClicked() && this.pendingT > 350;
+      if (this.pendingT > 350 && (i.justPressed('confirm') || i.justPressed('cancel') || clickDismiss)) {
         this.pending = null;
         this.screen = 'play';
       }
       return;
     }
 
-    if (this.screen === 'dead') {
-      if (i.justPressed('confirm')) {
-        // Death costs your cargo, not your progress. [design]
-        this.pod.respawn();
-        this.screen = 'play';
-        this.say('Reinitialised. Cargo bay was not recovered.');
+    // Mouse clicks are tested against whatever the menu drew last frame —
+    // drawScreen() rebuilds clickTargets every render, one screen's worth
+    // at a time, so there is nothing here to disambiguate by this.screen.
+    if (i.mouseClicked()) {
+      const mx = i.mouseX, my = i.mouseY;
+      for (const t of this.clickTargets) {
+        if (mx >= t.x && mx < t.x + t.w && my >= t.y && my < t.y + t.h) { t.run(); break; }
       }
+    }
+
+    if (this.screen === 'dead') {
+      if (i.justPressed('confirm')) this.reinitialise();
       return;
     }
 
@@ -217,6 +226,13 @@ export class Game {
       else if (this.screen === 'sell') this.sell();
       else if (this.screen === 'repair') this.buyRepair();
     }
+  }
+
+  /** Register a clickable region for the current frame and report hover. */
+  private hit(x: number, y: number, w: number, h: number, run: () => void): boolean {
+    this.clickTargets.push({ x, y, w, h, run });
+    const mx = this.input.mouseX, my = this.input.mouseY;
+    return mx >= x && mx < x + w && my >= y && my < y + h;
   }
 
   // ---------------------------------------------------------------- economy
@@ -254,15 +270,37 @@ export class Game {
   private buyUpgrade(catIndex: number): void {
     const cat = CATEGORIES[catIndex];
     const cur = this.pod[cat.key] as unknown as number;
-    const next = cur + 1;
-    if (next >= cat.list.length) return this.say('Already at maximum tier.');
-    const price = cat.list[next].price;
-    if (this.pod.cash < price) return this.say(`Need $${price.toLocaleString()}.`);
-    this.pod.cash -= price;
-    (this.pod as unknown as Record<string, number>)[cat.key] = next;
+    this.buyUpgradeTo(catIndex, cur + 1);
+  }
+
+  /**
+   * Buy straight up to `target`, paying the sum of every tier between the
+   * one currently owned and it. This is what a click on an upgrade tile
+   * does — the mouse selects the part outright rather than stepping the
+   * ladder one BUY press per tier, which is what "buy in succession" meant.
+   */
+  private buyUpgradeTo(catIndex: number, target: number): void {
+    const cat = CATEGORIES[catIndex];
+    const cur = this.pod[cat.key] as unknown as number;
+    if (target >= cat.list.length) return this.say('Already at maximum tier.');
+    if (target <= cur) return;
+
+    let total = 0;
+    for (let t = cur + 1; t <= target; t++) total += cat.list[t].price;
+    if (this.pod.cash < total) return this.say(`Need $${total.toLocaleString()}.`);
+
+    this.pod.cash -= total;
+    (this.pod as unknown as Record<string, number>)[cat.key] = target;
     if (cat.key === 'hull') this.pod.hp = this.pod.maxHp;
-    this.say(`Installed ${cat.list[next].name}.`);
+    this.say(`Installed ${cat.list[target].name}.`);
     this.save();
+  }
+
+  private reinitialise(): void {
+    // Death costs your cargo, not your progress. [design]
+    this.pod.respawn();
+    this.screen = 'play';
+    this.say('Reinitialised. Cargo bay was not recovered.');
   }
 
   private say(text: string): void { this.toast = text; this.toastT = 2600; }
@@ -506,6 +544,10 @@ export class Game {
    */
   private drawScreen(): void {
     const g = this.ctx;
+    // Rebuilt fresh every render; updateMenu tests clicks against whichever
+    // screen actually drew last frame.
+    this.clickTargets.length = 0;
+
     g.fillStyle = 'rgba(4,6,4,.72)';
     g.fillRect(0, 0, VIEW_W, VIEW_H);
 
@@ -520,7 +562,9 @@ export class Game {
       closeStud(g, px + pw - 26, py + 26);
       glowText(g, 'The Foreman logs the loss and files a replacement request.',
         cx, s.y + 120, 13, GREEN_DIM);
-      button(g, cx - 110, s.y + 168, 220, 44, 'REINITIALISE  [SPACE]', 'red', true);
+      const rb = { x: cx - 110, y: s.y + 168, w: 220, h: 44 };
+      button(g, rb.x, rb.y, rb.w, rb.h, 'REINITIALISE  [SPACE]', 'red', true);
+      this.hit(rb.x, rb.y, rb.w, rb.h, () => this.reinitialise());
       g.textAlign = 'left';
       scanlines(g, s);
       return;
@@ -532,6 +576,7 @@ export class Game {
     };
     embossed(g, titles[this.screen], px + pw / 2, py + 46, 25);
     closeStud(g, px + pw - 26, py + 26);
+    this.hit(px + pw - 26 - 13, py + 26 - 13, 26, 26, () => { this.screen = 'play'; this.save(); });
 
     // Credits sit on the casing rather than inside the display, as on the
     // original's panels — and it keeps them clear of the tab strip.
@@ -550,7 +595,9 @@ export class Game {
       glowText(g, `${this.pod.fuel.toFixed(1)} / ${this.pod.maxFuel} L`, rx, s.y + 150, 26);
       glowText(g, `REFILL COST  $${Math.round(need * FUEL_PER_L).toLocaleString()}`,
         rx, s.y + 186, 15, GREEN_DIM);
-      button(g, rx - 120, s.y + 220, 240, 48, 'FILL TANK  [SPACE]', 'red', need > 0);
+      const fb = { x: rx - 120, y: s.y + 220, w: 240, h: 48 };
+      button(g, fb.x, fb.y, fb.w, fb.h, 'FILL TANK  [SPACE]', 'red', need > 0);
+      this.hit(fb.x, fb.y, fb.w, fb.h, () => this.buyFuel());
     } else if (this.screen === 'repair') {
       const missing = this.pod.maxHp - this.pod.hp;
       const gx = s.x + 74;
@@ -561,7 +608,9 @@ export class Game {
       glowText(g, `${Math.ceil(this.pod.hp)} / ${this.pod.maxHp} HP`, rx, s.y + 150, 26);
       glowText(g, `REPAIR COST  $${(missing * REPAIR_COST).toLocaleString()}`,
         rx, s.y + 186, 15, GREEN_DIM);
-      button(g, rx - 120, s.y + 220, 240, 48, 'TOTAL REPAIR  [SPACE]', 'green', missing > 0);
+      const pb = { x: rx - 120, y: s.y + 220, w: 240, h: 48 };
+      button(g, pb.x, pb.y, pb.w, pb.h, 'TOTAL REPAIR  [SPACE]', 'green', missing > 0);
+      this.hit(pb.x, pb.y, pb.w, pb.h, () => this.buyRepair());
     }
 
     glowText(g, '[ ESC ]  LEAVE', cx, s.y + s.h - 14, 12, GREEN_DIM);
@@ -594,7 +643,9 @@ export class Game {
     if (total === 0) glowText(g, 'BAY EMPTY', cx, s.y + 140, 16, GREEN_DIM);
     else {
       glowText(g, `TOTAL  $${total.toLocaleString()}`, cx, y + 26, 19);
-      button(g, cx - 110, y + 46, 220, 44, 'SELL ALL  [SPACE]', 'green', true);
+      const sb = { x: cx - 110, y: y + 46, w: 220, h: 44 };
+      button(g, sb.x, sb.y, sb.w, sb.h, 'SELL ALL  [SPACE]', 'green', true);
+      this.hit(sb.x, sb.y, sb.w, sb.h, () => this.sell());
     }
   }
 
@@ -623,7 +674,8 @@ export class Game {
     for (let i = 0; i < CATEGORIES.length; i++) {
       const tx = s.x + 26 + i * tabW;
       const on = i === this.menuIndex;
-      g.fillStyle = on ? 'rgba(93,255,100,.18)' : 'rgba(0,0,0,.35)';
+      const hover = this.hit(tx, tabY, tabW, 26, () => { this.menuIndex = i; });
+      g.fillStyle = on ? 'rgba(93,255,100,.18)' : hover ? 'rgba(93,255,100,.08)' : 'rgba(0,0,0,.35)';
       g.beginPath(); g.roundRect(tx + 1, tabY, tabW - 2, 26, [5, 5, 0, 0]); g.fill();
       g.strokeStyle = on ? GREEN : GREEN_FAINT;
       g.lineWidth = 1;
@@ -670,22 +722,31 @@ export class Game {
     if (maxed) {
       glowText(g, 'FULLY UPGRADED', gx, top + 60, 16, GREEN);
     } else {
+      // Cumulative cost to reach each tier, so a click on tier N buys
+      // everything between the owned tier and N in one purchase, and the
+      // price shown under each tile is what that click actually costs.
+      let running = 0;
       for (let t = cur + 1, n = 0; t < cat.list.length; t++, n++) {
+        running += cat.list[t].price;
         const bx = gx + (n % perRow) * (box + gap);
         const by = top + 8 + Math.floor(n / perRow) * (box + 40);
-        const next = t === cur + 1;
-        const can = this.pod.cash >= cat.list[t].price;
+        const isNext = t === cur + 1;
+        const cost = running;
+        const can = this.pod.cash >= cost;
+        const target = t;
 
-        cell(g, bx, by, box, box, next);
+        const hover = this.hit(bx, by, box, box, () => this.buyUpgradeTo(this.menuIndex, target));
+        cell(g, bx, by, box, box, isNext || hover);
         thumb(`part_${cat.art}_${t}`, bx, by, box);
         g.textAlign = 'center';
-        glowText(g, `$${cat.list[t].price.toLocaleString()}`, bx + box / 2, by + box + 15, 11,
-          next ? (can ? GREEN : '#b45a4a') : GREEN_DIM);
+        glowText(g, `$${cost.toLocaleString()}`, bx + box / 2, by + box + 15, 11,
+          hover || isNext ? (can ? GREEN : '#b45a4a') : GREEN_DIM);
         g.textAlign = 'left';
       }
     }
 
-    // ---- buy
+    // ---- buy: click any tile above to jump straight to that tier, or use
+    // this to step to the very next one from the keyboard
     g.textAlign = 'center';
     const cx = s.x + s.w / 2;
     const by = s.y + s.h - 76;
@@ -694,7 +755,9 @@ export class Game {
       const can = this.pod.cash >= nxt.price;
       glowText(g, `NEXT  ${nxt.name}   $${nxt.price.toLocaleString()}`, cx, by - 8, 13,
         can ? GREEN : '#b45a4a');
-      button(g, cx - 110, by, 220, 40, 'BUY  [SPACE]', 'green', can);
+      const bb = { x: cx - 110, y: by, w: 220, h: 40 };
+      button(g, bb.x, bb.y, bb.w, bb.h, 'BUY  [SPACE]', 'green', can);
+      this.hit(bb.x, bb.y, bb.w, bb.h, () => this.buyUpgrade(this.menuIndex));
     }
   }
 

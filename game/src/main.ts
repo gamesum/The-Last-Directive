@@ -27,6 +27,20 @@ fit();
 loadBackdrop('surface', 'bg/surface.png');
 
 const input = new Input();
+
+// Mouse -> VIEW-space coordinates, so shop UI can be driven with a pointer
+// in addition to the keyboard. Click-through from touch is avoided because
+// the existing touch handler below calls preventDefault() on touchstart,
+// which suppresses the synthetic mouse events browsers would otherwise fire.
+canvas.addEventListener('mousemove', (e) => {
+  const r = canvas.getBoundingClientRect();
+  input.setMousePos(
+    (e.clientX - r.left) * (VIEW_W / r.width),
+    (e.clientY - r.top) * (VIEW_H / r.height),
+  );
+});
+canvas.addEventListener('mousedown', () => input.setMouseDown(true));
+window.addEventListener('mouseup', () => input.setMouseDown(false));
 const seed = new URLSearchParams(location.search).get('seed') ?? 'venice-01';
 if (new URLSearchParams(location.search).has('wipe')) Game.wipeSave();
 
