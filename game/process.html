@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Art processor</title>
+    <style>
+      body { background:#12131a; color:#cfd6d8; font:13px ui-monospace,monospace; padding:20px }
+      #log { white-space:pre-wrap; line-height:1.6 }
+      canvas { image-rendering:pixelated; background:#222; margin:4px; vertical-align:bottom }
+    </style>
+  </head>
+  <body>
+    <div id="log">idle</div>
+    <div id="out"></div>
+    <script type="module">
+/**
+ * One-off asset pipeline for the AI-generated sprites.
+ *
+ * The image models can't emit alpha, so everything is generated on a flat
+ * magenta field. This knocks that out, trims to the content box, and
+ * downsamples to the size the sprite is actually drawn at in game — which is
+ * what the original did too: detailed art, displayed small.
+ *
+ * Open /process.html and it runs. Re-runnable and idempotent.
+ */
+const log = (s) => { document.getElementById('log').textContent += '\n' + s; };
+const out = document.getElementById('out');
+
+const load = (src) => new Promise((res, rej) => {
+  const i = new Image();
+  i.onload = () => res(i);
+  i.onerror = () => rej(new Error('load failed: ' + src));
+  i.src = src;
+});
+
+function cv(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return [c, c.getContext('2d', { willReadFrequently: true })];
+}
+
+/** Knock out the magenta field and return the trimmed content box. */
+function keyAndTrim(img, sx = 0, sy = 0, sw = img.width, sh = img.height) {
+  const [c, g] = cv(sw, sh);
+  g.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+  const d = g.getImageData(0, 0, sw, sh);
+  const p = d.data;
+  let minX = sw, minY = sh, maxX = -1, maxY = -1;
+
+  for (let i = 0; i < p.length; i += 4) {
+    const r = p[i], gg = p[i + 1], b = p[i + 2];
+    // magenta: red and blue both high, green comparatively low
+    const isKey = r > 140 && b > 140 && gg < 130 && (r - gg) > 55 && (b - gg) > 55;
+    if (isKey) { p[i + 3] = 0; continue; }
+    const px = (i / 4) % sw, py = (i / 4 / sw) | 0;
+    if (px < minX) minX = px;
+    if (py < minY) minY = py;
+    if (px > maxX) maxX = px;
+    if (py > maxY) maxY = py;
+  }
+  g.putImageData(d, 0, 0);
+  if (maxX < 0) return null;
+
+  const tw = maxX - minX + 1, th = maxY - minY + 1;
+  const [t, tg] = cv(tw, th);
+  tg.drawImage(c, minX, minY, tw, th, 0, 0, tw, th);
+  return t;
+}
+
+/** Halve repeatedly, then land on the target — much cleaner than one jump. */
+function downscale(src, targetW, targetH) {
+  let cur = src;
+  while (cur.width / 2 > targetW && cur.height / 2 > targetH) {
+    const [h, hg] = cv(Math.max(1, cur.width >> 1), Math.max(1, cur.height >> 1));
+    hg.imageSmoothingEnabled = true;
+    hg.imageSmoothingQuality = 'high';
+    hg.drawImage(cur, 0, 0, h.width, h.height);
+    cur = h;
+  }
+  const [f, fg] = cv(targetW, targetH);
+  fg.imageSmoothingEnabled = true;
+  fg.imageSmoothingQuality = 'high';
+  fg.drawImage(cur, 0, 0, targetW, targetH);
+  return f;
+}
+
+/** Fit inside a box, preserving aspect. */
+function fit(src, boxW, boxH) {
+  const s = Math.min(boxW / src.width, boxH / src.height);
+  return downscale(src, Math.max(1, Math.round(src.width * s)), Math.max(1, Math.round(src.height * s)));
+}
+
+async function save(canvas, name) {
+  await fetch('/__shot?into=art&name=' + name, {
+    method: 'POST', body: canvas.toDataURL('image/png'),
+  });
+  out.appendChild(canvas);
+  log(`  saved ${name}.png  ${canvas.width}x${canvas.height}`);
+}
+
+async function run() {
+  document.getElementById('log').textContent = 'processing...';
+
+  // ---- mining machine -> pod sprite, sized to its 40px collision box
+  try {
+    const img = await load('/art-src/machine.png');
+    const t = keyAndTrim(img);
+    await save(fit(t, 60, 44), 'pod');
+  } catch (e) { log('  FAIL pod: ' + e.message); }
+
+  // ---- ore sheet: 4 across, 3 down. Grid order matches MINERALS 0..9.
+  try {
+    const img = await load('/art-src/ores.png');
+    const cw = img.width / 4, ch = img.height / 3;
+    const names = [
+      'ore_0', 'ore_1', 'ore_2', 'ore_3',
+      'ore_4', 'ore_5', 'ore_6', 'ore_7',
+      'ore_8', 'ore_9', 'artifact_0', 'rock_0',
+    ];
+    for (let i = 0; i < 12; i++) {
+      const t = keyAndTrim(img, (i % 4) * cw, ((i / 4) | 0) * ch, cw, ch);
+      if (!t) { log('  skip ' + names[i] + ' (empty cell)'); continue; }
+      await save(fit(t, 34, 34), names[i]);
+    }
+  } catch (e) { log('  FAIL ores: ' + e.message); }
+
+  // ---- surface facilities
+  for (const n of ['shop_fuel', 'shop_processor', 'shop_repair', 'shop_outfitter']) {
+    try {
+      const img = await load(`/art-src/${n}.png`);
+      const t = keyAndTrim(img);
+      await save(fit(t, 150, 120), n + '_t');
+    } catch (e) { log(`  FAIL ${n}: ` + e.message); }
+  }
+
+  log('\ndone.');
+}
+
+run();
+    </script>
+  </body>
+</html>

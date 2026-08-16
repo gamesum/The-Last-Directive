@@ -1,0 +1,35 @@
+# --- build / tooling noise ---
+node_modules/
+dist/
+shots/
+.vite/
+
+# --- secrets ---
+.env.local
+.env*.local
+*.key
+
+# --- third-party binaries, not ours to redistribute ---
+reference/tools/
+
+# ---------------------------------------------------------------------------
+# EXTRACTED ORIGINAL GAME ASSETS — DO NOT COMMIT
+#
+# Everything below was extracted from the original Flash build and is XGen
+# Studios' copyrighted property: decompiled ActionScript, sprite bitmaps,
+# audio, and verbatim dialogue strings. It is reference material for
+# reimplementation only and must never be redistributed or shipped.
+#
+# Our own analysis of it (reference/motherload-spec.md) and our own
+# extraction tools (reference/*.py) ARE tracked — measurements and code we
+# wrote, not their content.
+# ---------------------------------------------------------------------------
+reference/decompiled/
+reference/bitmaps/
+reference/audio/
+*.swf
+reference/v937_dis*.txt
+reference/v937_strings.txt
+reference/strings_*.txt
+reference/stats_*.txt
+reference/generateEarth_flat.txt
