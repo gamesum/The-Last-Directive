@@ -15,10 +15,12 @@ import {
   DRILLS, HULLS, ENGINES, TANKS, RADIATORS, BAYS, Upgrade, SKY_ROWS, T, START_CASH,
 } from '../data/spec';
 
-type Screen = 'play' | 'fuel' | 'sell' | 'repair' | 'upgrade' | 'dead' | 'intro' | 'ending';
+type Screen =
+  | 'play' | 'fuel' | 'sell' | 'repair' | 'upgrade' | 'dead'
+  | 'intro' | 'ending' | 'transmission';
 
 interface Building {
-  id: Exclude<Screen, 'play' | 'dead' | 'intro' | 'ending'>;
+  id: Exclude<Screen, 'play' | 'dead' | 'intro' | 'ending' | 'transmission'>;
   tile: number; w: number; label: string;
 }
 
@@ -67,7 +69,9 @@ export class Game {
   private toastT = 0;
   private time = 0;
   private acc = 0;
-  private log: { text: string; t: number }[] = [];
+  /** The transmission currently held on screen, if any. */
+  private pending: Transmission | null = null;
+  private pendingT = 0;
   private firedTransmissions = new Set<number>();
 
   private intro: Intro | null = null;
@@ -174,6 +178,18 @@ export class Game {
 
   private updateMenu(): void {
     const i = this.input;
+
+    if (this.screen === 'transmission') {
+      this.pendingT += 1000 / FPS;
+      // Brief lockout so a keypress already in flight cannot skip the line
+      // the instant it appears.
+      if (this.pendingT > 350 && (i.justPressed('confirm') || i.justPressed('cancel'))) {
+        this.pending = null;
+        this.screen = 'play';
+      }
+      return;
+    }
+
     if (this.screen === 'dead') {
       if (i.justPressed('confirm')) {
         // Death costs your cargo, not your progress. [design]
@@ -251,10 +267,12 @@ export class Game {
 
   private say(text: string): void { this.toast = text; this.toastT = 2600; }
 
-  /** Push a line onto the transmission feed, newest first. */
+  /** Raise a line as a held transmission, same as a depth trigger. */
   private logLine(text: string): void {
-    this.log.unshift({ text, t: this.time });
-    if (this.log.length > 4) this.log.pop();
+    const [from, ...rest] = text.split(': ');
+    this.pending = { depth: 0, from, text: rest.join(': ') };
+    this.pendingT = 0;
+    this.screen = 'transmission';
   }
 
   // ---------------------------------------------------------------- events
@@ -280,7 +298,13 @@ export class Game {
       if (this.firedTransmissions.has(i)) continue;
       if (this.pod.maxDepth <= t.depth) {
         this.firedTransmissions.add(i);
-        this.logLine(`${t.from}: ${t.text}`);
+        // [ffdec] The original does gotoAndStop('transmissionFrame') here,
+        // which halts the whole timeline: no physics, no fuel burn, nothing
+        // until you dismiss it. A passive corner feed let the tank drain
+        // while you were reading, which is a different game.
+        this.pending = t;
+        this.pendingT = 0;
+        this.screen = 'transmission';
         break;
       }
     }
@@ -335,7 +359,8 @@ export class Game {
     this.renderer.draw(this.world, this.pod, this.cam, this.time);
     this.drawBuildings();
     this.drawHUD();
-    if (this.screen !== 'play') this.drawScreen();
+    if (this.screen === 'transmission') this.drawTransmission();
+    else if (this.screen !== 'play') this.drawScreen();
     if (this.toastT > 0) this.drawToast();
     void g;
   }
@@ -409,34 +434,64 @@ export class Game {
     // cargo readout
     chunky(g, `BAY ${p.bayUsed()}/${p.bayCapacity}`, VIEW_W - 150, 74, 15, '#cfe89a', 'right');
 
-    this.drawTransmissionFeed();
   }
 
-  /** Transmissions arrive on a small Pip-Boy screen in the lower-left. */
-  private drawTransmissionFeed(): void {
-    const live = this.log.filter(l => this.time - l.t < 24000);
-    if (!live.length) return;
-
+  /**
+   * A held transmission: the game stops behind it.
+   *
+   * [ffdec] The original jumps the timeline to a dedicated frame for these,
+   * so the simulation is not running at all while one is up — no drift, no
+   * fuel burn, no falling. Ours pauses for the same reason: these are the
+   * only story the game tells, and reading them should never cost fuel.
+   */
+  private drawTransmission(): void {
     const g = this.ctx;
-    const w = 460, h = 26 + live.length * 22;
-    const x = 14, y = VIEW_H - h - 14;
+    const t = this.pending;
+    if (!t) return;
 
-    const newest = this.time - live[0].t;
-    const a = Math.min(1, newest / 260) * Math.min(1, (24000 - newest) / 1800);
-    g.save();
-    g.globalAlpha = Math.max(0, a);
+    g.fillStyle = 'rgba(4,6,4,.72)';
+    g.fillRect(0, 0, VIEW_W, VIEW_H);
 
-    const s = bezel(g, x, y, w, h);
-    for (let i = 0; i < live.length; i++) {
-      const age = this.time - live[i].t;
-      const fade = Math.max(0.28, 1 - age / 24000);
-      g.globalAlpha = Math.max(0, a * fade);
-      glowText(g, live[i].text, s.x + 12, s.y + 20 + i * 22, 13,
-        i === 0 ? GREEN : GREEN_DIM);
+    const w = 620, h = 250;
+    const x = (VIEW_W - w) / 2;
+    const y = (VIEW_H - h) / 2;
+    const s = bezel(g, x, y, w, h, 34);
+
+    embossed(g, 'INCOMING TRANSMISSION', x + w / 2, y + 42, 19);
+    closeStud(g, x + w - 24, y + 24);
+
+    g.textAlign = 'center';
+    glowText(g, t.from, s.x + s.w / 2, s.y + 34, 15, GREEN, true);
+    g.strokeStyle = GREEN_FAINT;
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(s.x + 26, s.y + 46.5); g.lineTo(s.x + s.w - 26, s.y + 46.5);
+    g.stroke();
+
+    // Wrap to the screen rather than trusting the line to fit.
+    g.font = MONO(14);
+    const words = t.text.split(' ');
+    const lines: string[] = [];
+    let line = '';
+    for (const word of words) {
+      const probe = line ? `${line} ${word}` : word;
+      if (g.measureText(probe).width > s.w - 56 && line) { lines.push(line); line = word; }
+      else line = probe;
     }
-    g.globalAlpha = Math.max(0, a);
+    if (line) lines.push(line);
+
+    const startY = s.y + 84 + Math.max(0, (3 - lines.length)) * 10;
+    for (let i = 0; i < lines.length; i++)
+      glowText(g, lines[i], s.x + s.w / 2, startY + i * 24, 14, GREEN);
+
+    if (this.pendingT > 350) {
+      g.globalAlpha = 0.55 + 0.35 * Math.sin(this.time * 0.005);
+      glowText(g, '[ SPACE ]', s.x + s.w / 2, s.y + s.h - 18, 12, GREEN_DIM);
+      g.globalAlpha = 1;
+    }
+
     scanlines(g, s);
-    g.restore();
+    g.textAlign = 'left';
   }
 
   /**
@@ -595,19 +650,20 @@ export class Game {
     const colX = s.x + 22;
     const top = tabY + 44;
     g.textAlign = 'left';
+    const CUR = 124;
     glowText(g, 'CURRENT', colX, top, 12, GREEN_DIM);
-    cell(g, colX, top + 8, 96, 96, false);
-    if (!thumb(`part_${cat.art}_${cur}`, colX, top + 8, 96)) {
+    cell(g, colX, top + 8, CUR, CUR, false);
+    if (!thumb(`part_${cat.art}_${cur}`, colX, top + 8, CUR)) {
       g.textAlign = 'center';
-      glowText(g, '—', colX + 48, top + 62, 24, GREEN_DIM);
+      glowText(g, '—', colX + CUR / 2, top + 76, 24, GREEN_DIM);
       g.textAlign = 'left';
     }
-    glowText(g, cat.list[cur].name, colX, top + 126, 12, GREEN);
-    glowText(g, `${cat.list[cur].value}${cat.unit}`, colX, top + 144, 12, GREEN_DIM);
+    glowText(g, cat.list[cur].name, colX, top + CUR + 32, 12, GREEN);
+    glowText(g, `${cat.list[cur].value}${cat.unit}`, colX, top + CUR + 50, 12, GREEN_DIM);
 
     // ---- the ladder ahead
-    const gx = colX + 130;
-    const box = 72, gap = 12;
+    const gx = colX + CUR + 26;
+    const box = 96, gap = 12;
     const perRow = Math.max(1, Math.floor((s.x + s.w - 22 - gx) / (box + gap)));
     glowText(g, 'AVAILABLE UPGRADES', gx, top, 12, GREEN_DIM);
 
