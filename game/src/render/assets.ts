@@ -8,7 +8,7 @@
  */
 
 const NAMES = [
-  'pod',
+  'pod', 'pod_body', 'pod_drill',
   'ore_0', 'ore_1', 'ore_2', 'ore_3', 'ore_4',
   'ore_5', 'ore_6', 'ore_7', 'ore_8', 'ore_9',
   'artifact_0', 'rock_0',
@@ -16,6 +16,11 @@ const NAMES = [
 ] as const;
 
 const BACKDROPS = ['surface', 'mid', 'deep', 'lab'] as const;
+
+/** Upgrade thumbnails: one per tier, sliced out of the per-category sheets. */
+const PART_CATEGORIES = ['drills', 'hulls', 'engines', 'tanks', 'radiators', 'bays'];
+const PARTS = PART_CATEGORIES.flatMap(
+  (c) => Array.from({ length: 7 }, (_, i) => `part_${c}_${i}`));
 
 const store = new Map<string, HTMLImageElement>();
 
@@ -36,6 +41,7 @@ function one(name: string, url: string): Promise<void> {
 export async function loadAssets(): Promise<number> {
   await Promise.all([
     ...NAMES.map((n) => one(n, `art/${n}.png`)),
+    ...PARTS.map((n) => one(n, `art/${n}.png`)),
     ...BACKDROPS.map((n) => one(`bg_${n}`, `bg/${n}.png`)),
   ]);
   return store.size;

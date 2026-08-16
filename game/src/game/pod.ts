@@ -1,11 +1,13 @@
 import { World } from '../world/world';
 import {
   GRAVITY, FRICTION, AIR_RESISTANCE, TERMINAL_VEL, TILE,
-  POD_MASS, POD_HW, POD_HH, XVEL_EPS, YVEL_EPS,
+  POD_MASS, XVEL_EPS, YVEL_EPS,
   DRILLS, HULLS, ENGINES, TANKS, RADIATORS, BAYS,
   MINERALS, ORE_COUNT, T, isOre, isRock, isLava,
   ROCK_DIG_FACTOR, LAVA_DAMAGE, FALL_DAMAGE_VEL, FALL_BOUNCE, gasDamage,
-  FUEL_DIG_DIV, FUEL_FLY_DIV, FUEL_IDLE_DIV,
+  FUEL_DIG_DIV, FUEL_FLY_DIV, FUEL_IDLE_DIV, speedCap, liftCap,
+  CORNER_FORGIVE, CORNER_SLIDE, DIG_HOLD_FRAMES, COLLIDE_HW, COLLIDE_HH,
+  START_CASH,
 } from '../data/spec';
 
 export type Mode = 'air' | 'ground' | 'digging' | 'dead';
@@ -30,10 +32,12 @@ export class Pod {
   /** Visual tilt, purely cosmetic. [ffdec] +/-15 deg */
   rotation = 0;
   rotorVel = 0;
+  /** True only on frames the engine is actually firing — drives the flame. */
+  thrusting = false;
 
   hp = HULLS[0].value;
   fuel = 6;                 // [ffdec] the original starts you short, not full
-  cash = 0;
+  cash = START_CASH;
   score = 0;
   maxDepth = 0;
 
@@ -47,12 +51,14 @@ export class Pod {
   private digDir: Dir = 'down';
   private digProgress = 0;
   private digFromX = 0; private digFromY = 0;
+  private digIntent: Dir | null = null;
+  private digHold = 0;
 
   readonly events: PodEvent[] = [];
 
   constructor(private world: World) {
     this.x = 8.5 * TILE;
-    this.y = World.SURFACE_Y - POD_HH;
+    this.y = World.SURFACE_Y - COLLIDE_HH;
   }
 
   // ---------------------------------------------------------------- stats
@@ -78,6 +84,9 @@ export class Pod {
 
   get depthFeet(): number { return World.depthFeet(this.y); }
 
+  /** Which way the drill is cutting, or null when it isn't. */
+  get digDirection(): Dir | null { return this.mode === 'digging' ? this.digDir : null; }
+
   // ---------------------------------------------------------------- damage
   damage(d: number, cause: 'fall' | 'lava' | 'gas'): void {
     if (this.mode === 'dead') return;
@@ -97,12 +106,13 @@ export class Pod {
 
     const grounded = this.isGrounded();
     this.mode = grounded ? 'ground' : 'air';
+    this.thrusting = false;
 
     if (grounded && this.tryStartDig(c)) { this.idleBurn(); return; }
 
     const power = this.enginePower;
     const mass = this.getMass();
-    const capX = power / 10;
+    const capX = speedCap(power);
 
     if (grounded) {
       if (c.right) {
@@ -111,14 +121,22 @@ export class Pod {
       } else if (c.left) {
         this.xVel = Math.max(this.xVel - power / mass, -capX);
         this.burn(FUEL_FLY_DIV); this.facing = -1;
-      } else {
-        this.xVel *= FRICTION;
       }
+      // [ffdec] friction is applied unconditionally on the ground, not only
+      // when coasting — it sits outside the input branch in the original, and
+      // it is what holds ground speed below the engine's raw cap.
+      this.xVel *= FRICTION;
+
       if (c.up) {
         // [ffdec] stronger initial shove when pushing off the ground
         this.yVel = Math.max(this.yVel - (power / mass) * 2, -capX);
         this.burn(FUEL_FLY_DIV);
         this.rotorVel = Math.min(this.rotorVel + 1, 11);
+        this.thrusting = true;
+      } else {
+        // [ffdec] the original swaps to the tracked sprite on landing and
+        // kills the rotor outright. Without this the flame never goes out.
+        this.rotorVel = 0;
       }
       this.rotation *= 0.7;
     } else {
@@ -141,8 +159,9 @@ export class Pod {
       if (c.up) {
         this.rotorVel = Math.min(this.rotorVel + 1, 11);
         const accel = (c.left || c.right) ? power / mass / 1.5 : power / mass;
-        this.yVel = Math.max(this.yVel - accel, -power / 12);
+        this.yVel = Math.max(this.yVel - accel, -liftCap(power));
         this.burn(FUEL_FLY_DIV);
+        this.thrusting = true;
       } else {
         this.rotorVel = Math.max(this.rotorVel * 0.95, 0);
       }
@@ -173,10 +192,10 @@ export class Pod {
 
   // ---------------------------------------------------------------- digging
   private isGrounded(): boolean {
-    const yb = this.y + POD_HH + 1;
+    const yb = this.y + COLLIDE_HH + 1;
     const ty = Math.floor(yb / TILE);
-    const x1 = Math.floor((this.x - POD_HW + 1) / TILE);
-    const x2 = Math.floor((this.x + POD_HW - 1) / TILE);
+    const x1 = Math.floor((this.x - COLLIDE_HW + 1) / TILE);
+    const x2 = Math.floor((this.x + COLLIDE_HW - 1) / TILE);
     for (let tx = x1; tx <= x2; tx++) if (this.world.solidAt(tx, ty)) return true;
     return false;
   }
@@ -186,13 +205,23 @@ export class Pod {
     const cy = Math.floor(this.y / TILE);
     let tx = cx, ty = cy, dir: Dir = 'down';
 
+    const abandon = () => { this.digIntent = null; this.digHold = 0; return false; };
+
     if (c.down) { ty = cy + 1; dir = 'down'; }
     else if (c.left && Math.abs(this.xVel) < 4) { tx = cx - 1; dir = 'left'; }
     else if (c.right && Math.abs(this.xVel) < 4) { tx = cx + 1; dir = 'right'; }
-    else return false;
+    else return abandon();
 
-    if (!this.world.drillableAt(tx, ty)) return false;
+    if (!this.world.drillableAt(tx, ty)) return abandon();
 
+    // Hold the direction briefly before the drill bites. Without this, simply
+    // touching down while steering starts an unwanted shaft.
+    if (this.digIntent === dir) this.digHold++;
+    else { this.digIntent = dir; this.digHold = 1; }
+    if (this.digHold < DIG_HOLD_FRAMES) return false;
+
+    this.digIntent = null;
+    this.digHold = 0;
     this.mode = 'digging';
     this.digX = tx; this.digY = ty; this.digDir = dir;
     this.digProgress = 0;
@@ -247,22 +276,40 @@ export class Pod {
   }
 
   // ---------------------------------------------------------------- collision
-  /** Swept AABB against the tile grid, matching the original's probe order. */
+  /**
+   * Swept AABB against the tile grid, following the original's probe order,
+   * plus corner forgiveness.
+   *
+   * When both leading corners are blocked the move is stopped as before. When
+   * only one catches, and the overlap is shallow, the pod is nudged clear
+   * along the other axis so it slips past — the box behaves as though its
+   * corners were rounded. With a 40px machine in 50px tiles, threading a
+   * one-tile gap is otherwise unreasonably precise.
+   */
   private collideAndMove(): void {
-    if (this.xVel > 0) {
-      if (this.solidSpan(this.x + this.xVel + POD_HW, true)) this.xVel = 0;
-    } else if (this.xVel < 0) {
-      if (this.solidSpan(this.x + this.xVel - POD_HW, true)) this.xVel = 0;
+    if (this.xVel !== 0) {
+      const edge = this.x + this.xVel + (this.xVel > 0 ? COLLIDE_HW : -COLLIDE_HW);
+      const tx = Math.floor(edge / TILE);
+      const yTop = this.y - COLLIDE_HH + 1, yBot = this.y + COLLIDE_HH - 1;
+      const hitTop = this.world.solidAt(tx, Math.floor(yTop / TILE));
+      const hitBot = this.world.solidAt(tx, Math.floor(yBot / TILE));
+
+      if (hitTop && hitBot) this.xVel = 0;
+      else if (hitTop) this.slipPast((Math.floor(yTop / TILE) + 1) * TILE - yTop, 1);
+      else if (hitBot) this.slipPast(yBot - Math.floor(yBot / TILE) * TILE, -1);
     }
 
-    if (this.yVel > 0) {
-      if (this.solidSpan(this.y + this.yVel + POD_HH, false)) {
-        if (this.yVel > FALL_DAMAGE_VEL) this.damage(this.yVel / 2, 'fall');
-        this.events.push({ kind: 'land', speed: this.yVel });
-        this.yVel *= FALL_BOUNCE;      // [ffdec] -0.2 bounce
-      }
-    } else if (this.yVel < 0) {
-      if (this.solidSpan(this.y + this.yVel - POD_HH - 1, false)) this.yVel *= FALL_BOUNCE;
+    if (this.yVel !== 0) {
+      const down = this.yVel > 0;
+      const edge = this.y + this.yVel + (down ? COLLIDE_HH : -COLLIDE_HH - 1);
+      const ty = Math.floor(edge / TILE);
+      const xL = this.x - COLLIDE_HW + 1, xR = this.x + COLLIDE_HW - 1;
+      const hitL = this.world.solidAt(Math.floor(xL / TILE), ty);
+      const hitR = this.world.solidAt(Math.floor(xR / TILE), ty);
+
+      if (hitL && hitR) this.stopVertical(down);
+      else if (hitL) this.slipPast((Math.floor(xL / TILE) + 1) * TILE - xL, 1, true);
+      else if (hitR) this.slipPast(xR - Math.floor(xR / TILE) * TILE, -1, true);
     }
 
     if (Math.abs(this.xVel) < XVEL_EPS) this.xVel = 0;
@@ -272,27 +319,52 @@ export class Pod {
     this.y += this.yVel;
 
     // keep inside the shaft walls
-    const minX = POD_HW, maxX = this.world.w * TILE - POD_HW;
+    const minX = COLLIDE_HW, maxX = this.world.w * TILE - COLLIDE_HW;
     if (this.x < minX) { this.x = minX; this.xVel = 0; }
     if (this.x > maxX) { this.x = maxX; this.xVel = 0; }
-    if (this.y < POD_HH) { this.y = POD_HH; if (this.yVel < 0) this.yVel = 0; }
+    if (this.y < COLLIDE_HH) { this.y = COLLIDE_HH; if (this.yVel < 0) this.yVel = 0; }
 
     if (this.depthFeet < this.maxDepth) this.maxDepth = this.depthFeet;
   }
 
+  /** Is the whole collision box clear of solid tiles at this position? */
+  private boxFree(x: number, y: number): boolean {
+    const x1 = Math.floor((x - COLLIDE_HW + 1) / TILE);
+    const x2 = Math.floor((x + COLLIDE_HW - 1) / TILE);
+    const y1 = Math.floor((y - COLLIDE_HH + 1) / TILE);
+    const y2 = Math.floor((y + COLLIDE_HH - 1) / TILE);
+    for (let ty = y1; ty <= y2; ty++)
+      for (let tx = x1; tx <= x2; tx++)
+        if (this.world.solidAt(tx, ty)) return false;
+    return true;
+  }
+
   /**
-   * Probe the two corners of the leading edge, as the original's paired
-   * hitTest calls do — vertical:false means probe a horizontal edge.
+   * Slide a clipped corner clear instead of stopping on it.
+   *
+   * `overlap` is how far the offending corner reaches into the blocking tile
+   * and `sign` which way to move away from it. `nudgeX` is set when the
+   * blocked motion was vertical, so the nudge goes along x. Deep overlaps and
+   * nudges that aren't free fall back to stopping the move.
    */
-  private solidSpan(edge: number, vertical: boolean): boolean {
-    if (vertical) {
-      const tx = Math.floor(edge / TILE);
-      return this.world.solidAt(tx, Math.floor((this.y + POD_HH - 1) / TILE))
-          || this.world.solidAt(tx, Math.floor((this.y - POD_HH + 1) / TILE));
+  private slipPast(overlap: number, sign: number, nudgeX = false): void {
+    if (overlap <= CORNER_FORGIVE) {
+      const step = Math.min(overlap, CORNER_SLIDE) * sign;
+      if (nudgeX) {
+        if (this.boxFree(this.x + step, this.y)) { this.x += step; return; }
+      } else if (this.boxFree(this.x, this.y + step)) { this.y += step; return; }
     }
-    const ty = Math.floor(edge / TILE);
-    return this.world.solidAt(Math.floor((this.x + POD_HW - 1) / TILE), ty)
-        || this.world.solidAt(Math.floor((this.x - POD_HW + 1) / TILE), ty);
+    if (nudgeX) this.stopVertical(this.yVel > 0);
+    else this.xVel = 0;
+  }
+
+  /** [ffdec] landing: fall damage above the threshold, then a -0.2 bounce. */
+  private stopVertical(down: boolean): void {
+    if (down) {
+      if (this.yVel > FALL_DAMAGE_VEL) this.damage(this.yVel / 2, 'fall');
+      this.events.push({ kind: 'land', speed: this.yVel });
+    }
+    this.yVel *= FALL_BOUNCE;
   }
 
   // ---------------------------------------------------------------- economy
@@ -313,7 +385,7 @@ export class Pod {
   respawn(): void {
     this.mode = 'air';
     this.x = 8.5 * TILE;
-    this.y = World.SURFACE_Y - POD_HH;
+    this.y = World.SURFACE_Y - COLLIDE_HH;
     this.xVel = this.yVel = 0;
     this.hp = this.maxHp;
     this.fuel = this.maxFuel;

@@ -1,15 +1,17 @@
 import { World } from '../world/world';
 import { Pod } from '../game/pod';
 import {
-  tileTexture, bandForRow, podSprite, cavityColor, skylineTexture, surfaceTexture,
+  drawSoil, subForRow, cavityColorAtY, oreOverlay, rockOverlay, lavaOverlay,
+  gasOverlay, bedrockTile, surfaceTexture, skylineTexture, podParts, PodParts,
 } from './textures';
-import { img } from './assets';
-import { TILE, VIEW_W, VIEW_H, POD_HW, POD_HH, T, EARTH_H, SKY_ROWS } from '../data/spec';
+import {
+  TILE, VIEW_W, VIEW_H, T, EARTH_H, SKY_ROWS, isOre, isRock, isLava,
+} from '../data/spec';
 
 export interface Camera { x: number; y: number }
 
 /** Corner radius where excavated tunnel meets soil. The original's signature. */
-const R = 14;
+const R = 15;
 
 const backdrops: Record<string, HTMLImageElement | null> = { surface: null, deep: null };
 
@@ -20,68 +22,7 @@ export function loadBackdrop(name: 'surface' | 'deep', url: string): void {
   img.src = url;
 }
 
-/**
- * 1px-thin gradient strips, built once and stretched. Nearest-neighbour
- * replication along the thin axis keeps them exact while costing nothing.
- */
-function strip(w: number, h: number, x1: number, y1: number, a: number): HTMLCanvasElement {
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  const g = c.getContext('2d')!;
-  const gr = g.createLinearGradient(0, 0, x1, y1);
-  gr.addColorStop(0, `rgba(0,0,0,${a})`);
-  gr.addColorStop(1, 'rgba(0,0,0,0)');
-  g.fillStyle = gr;
-  g.fillRect(0, 0, w, h);
-  return c;
-}
-
-let _top: HTMLCanvasElement | null = null;
-let _left: HTMLCanvasElement | null = null;
-let _right: HTMLCanvasElement | null = null;
-const shadeTop = () => (_top ??= strip(1, 18, 0, 18, 0.34));
-const shadeLeft = () => (_left ??= strip(14, 1, 14, 0, 0.22));
-const shadeRight = () => (_right ??= (() => {
-  const c = document.createElement('canvas');
-  c.width = 14; c.height = 1;
-  const g = c.getContext('2d')!;
-  const gr = g.createLinearGradient(14, 0, 0, 0);
-  gr.addColorStop(0, 'rgba(0,0,0,.22)');
-  gr.addColorStop(1, 'rgba(0,0,0,0)');
-  g.fillStyle = gr; g.fillRect(0, 0, 14, 1);
-  return c;
-})());
-
 const clamp01 = (n: number) => Math.max(0, Math.min(1, n));
-
-/** Depth-wash control points: [depth 0..1, r, g, b, alpha]. */
-const WASH: [number, number, number, number, number][] = [
-  [0.00, 140, 74, 34, 0.00],
-  [0.10, 122, 62, 30, 0.10],
-  [0.28,  86, 62, 48, 0.19],
-  [0.46,  58, 60, 78, 0.27],
-  [0.64,  40, 50, 88, 0.35],
-  [0.82,  26, 32, 66, 0.44],
-  [1.00,  12, 10, 26, 0.56],
-];
-
-function washAt(t: number): [number, number, number, number] {
-  t = clamp01(t);
-  for (let i = 1; i < WASH.length; i++) {
-    const [t1] = WASH[i];
-    if (t > t1 && i < WASH.length - 1) continue;
-    const [t0, r0, g0, b0, a0] = WASH[i - 1];
-    const [, r1, g1, b1, a1] = WASH[i];
-    const k = t1 === t0 ? 0 : clamp01((t - t0) / (t1 - t0));
-    return [
-      Math.round(r0 + (r1 - r0) * k),
-      Math.round(g0 + (g1 - g0) * k),
-      Math.round(b0 + (b1 - b0) * k),
-      +(a0 + (a1 - a0) * k).toFixed(3),
-    ];
-  }
-  return [12, 10, 26, 0.56];
-}
 
 export class Renderer {
   constructor(private ctx: CanvasRenderingContext2D) {}
@@ -106,50 +47,73 @@ export class Renderer {
     const y0 = Math.max(0, Math.floor(cam.y / TILE));
     const y1 = Math.min(world.h - 1, Math.floor((cam.y + VIEW_H) / TILE));
 
-    // 1. Soil, drawn as full opaque squares.
-    //    Excavated cells get plain soil too, so that when the tunnel pass
-    //    rounds a corner away the cut reveals dirt rather than the sky.
-    for (let ty = y0; ty <= y1; ty++) {
-      const band = bandForRow(ty, EARTH_H);
-      for (let tx = x0; tx <= x1; tx++) {
-        const code = world.at(tx, ty);
-        const sx = Math.round(tx * TILE - cam.x);
-        const sy = Math.round(ty * TILE - cam.y);
-
-        if (code === T.EMPTY || code === T.HELL_AIR) {
-          if (ty >= SKY_ROWS) g.drawImage(tileTexture(1, world.variantAt(tx, ty), band), sx, sy);
-          continue;
-        }
-        if (code < 0 && code > -8) { g.drawImage(surfaceTexture(), sx, sy); continue; }
-        g.drawImage(tileTexture(code, world.variantAt(tx, ty), band), sx, sy);
-      }
-    }
-
-    // 2. excavated tunnels painted over the soil with rounded corners
-    this.drawTunnels(world, cam, x0, x1, y0, y1);
-
-    // 3. continuous depth wash — the strata textures change in steps, this
-    //    slides smoothly so the descent reads as one long gradient with no
-    //    visible seam between bands.
-    this.drawDepthWash(cam);
-
+    this.drawGround(world, cam, x0, x1, y0, y1);
+    this.drawCavity(world, cam, x0, x1, y0, y1);
     this.drawPod(pod, cam, time);
+
     g.restore();
   }
 
   /**
-   * Paints excavated cells olive-green over the soil with rounded corners.
+   * The solid crust.
    *
-   * Two separate fills, not one union path: rounded rects first, then the
-   * soil-corner discs. Combining them made overlapping subpaths cancel under
-   * nonzero winding, which punched holes at every concave corner.
-   *
-   * Only the strata actually on screen are considered, and the contact
-   * shadows are stretched from tiny cached 1px gradient strips rather than
-   * building a fresh CanvasGradient per cell — that was costing enough
-   * frame time to starve the fixed-step simulation.
+   * Every cell — including excavated ones, which the tunnel pass paints over
+   * afterwards — gets a window into one continuous soil sheet, addressed by
+   * world coordinate. That continuity is the whole point: cells butt up
+   * against each other with no seam, so the ground reads as one mass rather
+   * than a grid of tiles. Ore, rock and lava are then stamped on top as
+   * inclusions, with the soil running unbroken behind them.
    */
-  private drawTunnels(
+  private drawGround(
+    world: World, cam: Camera, x0: number, x1: number, y0: number, y1: number,
+  ): void {
+    const g = this.ctx;
+
+    for (let ty = Math.max(SKY_ROWS, y0); ty <= y1; ty++) {
+      const sub = subForRow(ty, EARTH_H);
+      const sy = Math.round(ty * TILE - cam.y);
+
+      for (let tx = x0; tx <= x1; tx++) {
+        const code = world.at(tx, ty);
+        const sx = Math.round(tx * TILE - cam.x);
+        const empty = code === T.EMPTY || code === T.HELL_AIR;
+
+        if (!empty) {
+          if (code === T.BEDROCK || code <= -8) {
+            g.drawImage(bedrockTile(world.variantAt(tx, ty)), sx, sy);
+            continue;
+          }
+          if (code < 0) { g.drawImage(surfaceTexture(), sx, sy); continue; }
+        }
+
+        drawSoil(g, tx, ty, sx, sy, sub);
+        if (empty) continue;
+
+        const v = world.variantAt(tx, ty);
+        if (isOre(code)) g.drawImage(oreOverlay(code - 6, v), sx, sy);
+        else if (isRock(code)) g.drawImage(rockOverlay(v), sx, sy);
+        else if (isLava(code)) g.drawImage(lavaOverlay(v), sx, sy);
+        else if (code === T.GAS) g.drawImage(gasOverlay(v), sx, sy);
+      }
+    }
+  }
+
+  /**
+   * The background, revealed wherever the ground has been cut away.
+   *
+   * It is completely detached from the blocks: a single screen-space vertical
+   * gradient — warm tan below the outpost, olive-green by a couple of thousand
+   * feet, near-black at the bottom — poured through a mask of the excavated
+   * cells. Nothing about it varies with where the tiles happen to sit, so no
+   * shading, seam or band boundary can appear along an edge or a corner. The
+   * soil in front keeps its own colour and is unaffected by depth.
+   *
+   * Two separate fills build the mask, not one union path: rounded rects
+   * first, then the soil-corner discs. Combining them made overlapping
+   * subpaths cancel under nonzero winding, punching holes at every concave
+   * corner.
+   */
+  private drawCavity(
     world: World, cam: Camera, x0: number, x1: number, y0: number, y1: number,
   ): void {
     const g = this.ctx;
@@ -160,87 +124,90 @@ export class Renderer {
 
     const top = Math.max(SKY_ROWS, y0);
     if (top > y1) return;
-    const bandLo = bandForRow(top, EARTH_H);
-    const bandHi = bandForRow(y1, EARTH_H);
 
-    for (let band = bandLo; band <= bandHi; band++) {
-      const rects = new Path2D();
-      const discs = new Path2D();
-      let any = false;
+    const rects = new Path2D();
+    const fillets = new Path2D();
+    let any = false;
 
-      for (let ty = top; ty <= y1; ty++) {
-        if (bandForRow(ty, EARTH_H) !== band) continue;
-        const sy = Math.round(ty * TILE - cam.y);
-        for (let tx = x0; tx <= x1; tx++) {
-          const sx = Math.round(tx * TILE - cam.x);
-          const up = open(tx, ty - 1), dn = open(tx, ty + 1);
-          const lf = open(tx - 1, ty), rt = open(tx + 1, ty);
+    /**
+     * Carve one corner of a soil cell so it meets open space with a rounded
+     * edge: the R-square at the corner minus the disc inscribed in it, with
+     * (dx,dy) pointing into the cell.
+     *
+     * This used to be a full disc centred *on* the corner, which bit R deep
+     * into the diagonal neighbour as well — that overreach is what produced
+     * the bulbous lobes at junctions.
+     */
+    const fillet = (cx: number, cy: number, dx: number, dy: number) => {
+      const ax = cx + dx * R, ay = cy + dy * R;
+      fillets.moveTo(cx, cy);
+      fillets.lineTo(ax, cy);
+      for (let i = 0; i <= 8; i++) {
+        const a = (i / 8) * (Math.PI / 2);
+        fillets.lineTo(ax - dx * R * Math.sin(a), ay - dy * R * Math.cos(a));
+      }
+      fillets.closePath();
+    };
 
-          if (open(tx, ty)) {
-            any = true;
-            rects.roundRect(sx, sy, TILE, TILE, [
-              up || lf ? 0 : R, up || rt ? 0 : R,
-              dn || rt ? 0 : R, dn || lf ? 0 : R,
-            ]);
-            continue;
-          }
+    for (let ty = top; ty <= y1; ty++) {
+      const sy = Math.round(ty * TILE - cam.y);
+      for (let tx = x0; tx <= x1; tx++) {
+        const sx = Math.round(tx * TILE - cam.x);
+        const up = open(tx, ty - 1), dn = open(tx, ty + 1);
+        const lf = open(tx - 1, ty), rt = open(tx + 1, ty);
 
-          // soil cell: round off any corner poking into open space
-          if (up && lf) { any = true; discs.moveTo(sx + R, sy); discs.arc(sx, sy, R, 0, Math.PI * 2); }
-          if (up && rt) { any = true; discs.moveTo(sx + TILE + R, sy); discs.arc(sx + TILE, sy, R, 0, Math.PI * 2); }
-          if (dn && lf) { any = true; discs.moveTo(sx + R, sy + TILE); discs.arc(sx, sy + TILE, R, 0, Math.PI * 2); }
-          if (dn && rt) { any = true; discs.moveTo(sx + TILE + R, sy + TILE); discs.arc(sx + TILE, sy + TILE, R, 0, Math.PI * 2); }
+        if (open(tx, ty)) {
+          any = true;
+          // A corner whose diagonal neighbour is open is left square. Two
+          // open cells meeting only at a corner are a passage, and rounding
+          // both sides of it pinched the throat to a cusp and left the
+          // boundary visibly undulating along every diagonal run. The solid
+          // cells on the other two sides still get filleted, which is what
+          // actually opens the passage out.
+          const ul = open(tx - 1, ty - 1), ur = open(tx + 1, ty - 1);
+          const dl = open(tx - 1, ty + 1), dr = open(tx + 1, ty + 1);
+          rects.roundRect(sx, sy, TILE, TILE, [
+            up || lf || ul ? 0 : R, up || rt || ur ? 0 : R,
+            dn || rt || dr ? 0 : R, dn || lf || dl ? 0 : R,
+          ]);
+          continue;
         }
+
+        // soil cell: round off any corner poking into open space
+        if (up && lf) { any = true; fillet(sx, sy, 1, 1); }
+        if (up && rt) { any = true; fillet(sx + TILE, sy, -1, 1); }
+        if (dn && lf) { any = true; fillet(sx, sy + TILE, 1, -1); }
+        if (dn && rt) { any = true; fillet(sx + TILE, sy + TILE, -1, -1); }
       }
-
-      if (!any) continue;
-
-      // Composited on its own layer rather than clipping the main context.
-      // `source-atop` confines the contact shadows to the green we just laid
-      // down, and no clip ever touches the context the pod and HUD draw into.
-      const lg = this.layerCtx();
-      lg.setTransform(1, 0, 0, 1, 0, 0);
-      lg.globalCompositeOperation = 'source-over';
-      lg.clearRect(0, 0, VIEW_W, VIEW_H);
-
-      lg.fillStyle = cavityColor(band);
-      lg.fill(rects);
-      lg.fill(discs);
-
-      lg.globalCompositeOperation = 'source-atop';
-      lg.imageSmoothingEnabled = true;
-      for (let ty = top; ty <= y1; ty++) {
-        if (bandForRow(ty, EARTH_H) !== band) continue;
-        const sy = Math.round(ty * TILE - cam.y);
-        for (let tx = x0; tx <= x1; tx++) {
-          if (!open(tx, ty)) continue;
-          const sx = Math.round(tx * TILE - cam.x);
-          if (!open(tx, ty - 1)) lg.drawImage(shadeTop(), sx - R, sy, TILE + R * 2, 18);
-          if (!open(tx - 1, ty)) lg.drawImage(shadeLeft(), sx, sy - R, 14, TILE + R * 2);
-          if (!open(tx + 1, ty)) lg.drawImage(shadeRight(), sx + TILE - 14, sy - R, 14, TILE + R * 2);
-        }
-      }
-      // Generated rock backdrop showing through the excavated space, so the
-      // tunnels gain depth texture that shifts as you descend. Kept subtle —
-      // the flat olive-green is the original's signature and stays dominant.
-      const depthT = clamp01((cam.y + VIEW_H / 2) / (EARTH_H * TILE));
-      const back = img(depthT < 0.45 ? 'bg_mid' : 'bg_deep');
-      if (back) {
-        lg.globalAlpha = 0.1 + depthT * 0.28;
-        lg.imageSmoothingEnabled = true;
-        const bw = back.width, bh = back.height;
-        const ox = -((cam.x * 0.25) % bw);
-        const oy = -((cam.y * 0.12) % bh);
-        for (let px = ox - bw; px < VIEW_W; px += bw)
-          for (let py = oy - bh; py < VIEW_H; py += bh)
-            lg.drawImage(back, Math.round(px), Math.round(py));
-        lg.globalAlpha = 1;
-      }
-
-      lg.globalCompositeOperation = 'source-over';
-
-      g.drawImage(this.layer!, 0, 0);
     }
+
+    if (!any) return;
+
+    // Built on its own layer rather than by clipping the main context — no
+    // clip ever touches the context the pod and HUD draw into.
+    const lg = this.layerCtx();
+    lg.setTransform(1, 0, 0, 1, 0, 0);
+    lg.globalCompositeOperation = 'source-over';
+    lg.clearRect(0, 0, VIEW_W, VIEW_H);
+    lg.fillStyle = '#000';
+    lg.fill(rects);
+    lg.fill(fillets);
+
+    lg.globalCompositeOperation = 'source-in';
+    const grd = lg.createLinearGradient(0, 0, 0, VIEW_H);
+    grd.addColorStop(0, cavityColorAtY(cam.y));
+    grd.addColorStop(1, cavityColorAtY(cam.y + VIEW_H));
+    lg.fillStyle = grd;
+    lg.fillRect(0, 0, VIEW_W, VIEW_H);
+    lg.globalCompositeOperation = 'source-over';
+
+    // Anything above the ground line is sky, not excavation. Without this the
+    // rounded corners on the topmost row bulge past the horizon and paint
+    // background colour into the sky.
+    const skyCut = Math.max(0, Math.min(VIEW_H, World.SURFACE_Y - cam.y));
+    if (skyCut > 0) lg.clearRect(0, 0, VIEW_W, skyCut);
+
+    g.drawImage(this.layer!, 0, 0);
   }
 
   private layer: HTMLCanvasElement | null = null;
@@ -254,33 +221,6 @@ export class Renderer {
       this._layerCtx = this.layer.getContext('2d')!;
     }
     return this._layerCtx;
-  }
-
-  /**
-   * A soft colour wash whose tint and strength are a continuous function of
-   * depth: warm rust near the surface, cooling through slate to near-black
-   * at the bottom. Applied to the world only, so the pod stays readable.
-   */
-  private drawDepthWash(cam: Camera): void {
-    const g = this.ctx;
-    const worldPx = EARTH_H * TILE;
-
-    // sample at the top and bottom of the viewport so the wash itself is a
-    // gradient down the screen, not a flat tint that pops as you scroll
-    const tTop = clamp01((cam.y) / worldPx);
-    const tBot = clamp01((cam.y + VIEW_H) / worldPx);
-    const a = washAt(tTop), b = washAt(tBot);
-    if (a[3] < 0.004 && b[3] < 0.004) return;
-
-    const horizon = World.SURFACE_Y - cam.y;
-    const y0 = Math.max(0, horizon);
-    if (y0 >= VIEW_H) return;
-
-    const grd = g.createLinearGradient(0, y0, 0, VIEW_H);
-    grd.addColorStop(0, `rgba(${a[0]},${a[1]},${a[2]},${a[3]})`);
-    grd.addColorStop(1, `rgba(${b[0]},${b[1]},${b[2]},${b[3]})`);
-    g.fillStyle = grd;
-    g.fillRect(0, y0, VIEW_W, VIEW_H - y0);
   }
 
   // ------------------------------------------------------------------
@@ -330,37 +270,99 @@ export class Renderer {
       g.drawImage(sk, Math.round(sx), Math.round(sy));
   }
 
+  /**
+   * The machine.
+   *
+   * Hull and drill are drawn as separate pieces so the drill can be pivoted
+   * about their seam to point at whatever it's cutting — the original swaps
+   * between dedicated dig-down and dig-across sprites to the same end.
+   *
+   * The transform order mirrors Flash's: tilt is applied in world space, then
+   * the mirror, exactly as `_rotation` and `_xscale` compose on a MovieClip.
+   */
   private drawPod(pod: Pod, cam: Camera, time: number): void {
     const g = this.ctx;
-    const sx = Math.round(pod.x - cam.x);
-    const sy = Math.round(pod.y - cam.y);
+    const p = podParts(pod.drill, pod.hull, pod.engine);
 
     g.save();
-    g.translate(sx, sy);
+    g.translate(Math.round(pod.x - cam.x), Math.round(pod.y - cam.y));
     g.rotate((pod.rotation * Math.PI) / 180);
+    g.scale(pod.facing, 1);
 
-    if (pod.rotorVel > 1) {
-      const len = 5 + pod.rotorVel * 1.8 + Math.sin(time * 0.05) * 2;
-      g.fillStyle = 'rgba(255,168,56,.85)';
-      g.fillRect(-11, POD_HH - 4, 6, len);
-      g.fillRect(5, POD_HH - 4, 6, len);
-      g.fillStyle = 'rgba(255,244,190,.95)';
-      g.fillRect(-10, POD_HH - 4, 4, len * 0.55);
-      g.fillRect(6, POD_HH - 4, 4, len * 0.55);
-    }
-
-    // sprite is centred on the pod's origin rather than pinned to the
-    // collision box, so upgraded drills can overhang without shifting it
-    const spr = podSprite(pod.facing, pod.drill, pod.hull, pod.engine);
     g.imageSmoothingEnabled = true;
-    g.drawImage(spr, Math.round(-spr.width / 2), Math.round(-spr.height / 2));
-    g.imageSmoothingEnabled = false;
+    g.drawImage(p.body, Math.round(-p.w / 2), Math.round(-p.h / 2));
 
-    if (pod.mode === 'digging') {
-      g.fillStyle = `rgba(255,236,170,${0.45 + 0.45 * Math.sin(time * 0.09)})`;
-      const dx = pod.facing === 1 ? POD_HW + 2 : -POD_HW - 8;
-      g.fillRect(dx, -4, 7, 8);
-    }
+    // Flame is drawn after the hull so the nozzles in the art stay visible
+    // and the plume reads as coming out of them. It rides rotorVel, which
+    // spools up and down over several frames rather than snapping on.
+    this.drawExhaust(g, pod, p, time);
+
+    const dir = pod.digDirection;
+    const down = dir === 'down';
+    g.save();
+    // pull the head back when it swings under the machine, so it sits beneath
+    // the hull rather than hanging off the nose
+    g.translate(-p.w / 2 + p.seam - (down ? 12 : 0), 0);
+    if (down) g.rotate(Math.PI / 2);
+    if (dir) g.rotate(Math.sin(time * 0.05) * 0.07);        // bite wobble
+    g.drawImage(p.drill, 0, Math.round(-(down ? p.drillMidY : p.h / 2)));
     g.restore();
+
+    g.imageSmoothingEnabled = false;
+    g.restore();
+  }
+
+  /**
+   * Twin thruster plumes under the belly, drawn in the pod's own frame.
+   *
+   * Three nested teardrops — a wide soft glow, an orange body and a white
+   * core — each flickering on its own frequency so the flame never repeats
+   * visibly. Length and width track `rotorVel`, which ramps over ~11 frames,
+   * so the jets visibly light and die rather than popping. Below them a few
+   * embers fall away on a looping cycle.
+   */
+  private drawExhaust(
+    g: CanvasRenderingContext2D, pod: Pod, p: PodParts, time: number,
+  ): void {
+    const power = clamp01(pod.rotorVel / 11);
+    if (power < 0.04) return;
+
+    // Nozzle mouths come from the machine geometry rather than being guessed,
+    // so the flame always starts exactly at the bell.
+    for (let n = 0; n < p.nozzles.length; n++) {
+      const { x: ox, y: y0 } = p.nozzles[n];
+      const flick = 0.86 + 0.14 * Math.sin(time * 0.09 + n * 2.1)
+                        + 0.06 * Math.sin(time * 0.23 + n);
+      const len = (8 + power * 22) * flick;
+      const wide = (3 + power * 1.6) * (0.9 + 0.1 * Math.sin(time * 0.17 + n));
+
+      const cone = (halfW: number, l: number, top: string, bottom: string) => {
+        const grd = g.createLinearGradient(0, y0, 0, y0 + l);
+        grd.addColorStop(0, top);
+        grd.addColorStop(1, bottom);
+        g.fillStyle = grd;
+        g.beginPath();
+        g.moveTo(ox - halfW, y0);
+        g.quadraticCurveTo(ox - halfW * 0.75, y0 + l * 0.62, ox, y0 + l);
+        g.quadraticCurveTo(ox + halfW * 0.75, y0 + l * 0.62, ox + halfW, y0);
+        g.closePath();
+        g.fill();
+      };
+
+      cone(wide * 1.7, len * 1.15, 'rgba(255,150,60,.30)', 'rgba(255,90,30,0)');
+      cone(wide, len, 'rgba(255,206,110,.92)', 'rgba(255,120,40,0)');
+      cone(wide * 0.44, len * 0.58, 'rgba(255,253,246,.98)', 'rgba(255,232,170,0)');
+
+      // embers, on a deterministic loop so they cost nothing to track
+      for (let e = 0; e < 3; e++) {
+        const t = ((time * 0.012 + e * 0.37 + n * 0.19) % 1);
+        const ey = y0 + len * (0.7 + t * 1.1);
+        const ex = ox + Math.sin((e + n) * 9.7 + t * 4) * (3 + t * 7);
+        g.globalAlpha = (1 - t) * 0.8 * power;
+        g.fillStyle = e % 2 ? '#ffd79a' : '#ff9a4a';
+        g.fillRect(Math.round(ex), Math.round(ey), 2, 2);
+      }
+      g.globalAlpha = 1;
+    }
   }
 }

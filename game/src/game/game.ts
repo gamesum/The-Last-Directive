@@ -4,32 +4,54 @@ import { Input } from '../core/input';
 import { Renderer, Camera } from '../render/render';
 import { img } from '../render/assets';
 import { TRANSMISSIONS, Transmission } from '../data/transmissions';
+import { Intro } from './intro';
+import { Ending, Choice } from './ending';
 import {
   bezel, scanlines, glowText, chunky, cylinder, MONO, GREEN, GREEN_DIM, GREEN_FAINT,
+  embossed, button, cell, closeStud,
 } from '../ui/crt';
 import {
   TILE, VIEW_W, VIEW_H, DT, FPS, MINERALS, ORE_COUNT, REPAIR_COST, FUEL_PER_L,
-  DRILLS, HULLS, ENGINES, TANKS, RADIATORS, BAYS, Upgrade,
+  DRILLS, HULLS, ENGINES, TANKS, RADIATORS, BAYS, Upgrade, SKY_ROWS, T, START_CASH,
 } from '../data/spec';
 
-type Screen = 'play' | 'fuel' | 'sell' | 'repair' | 'upgrade' | 'dead';
+type Screen = 'play' | 'fuel' | 'sell' | 'repair' | 'upgrade' | 'dead' | 'intro' | 'ending';
 
-interface Building { id: Exclude<Screen, 'play' | 'dead'>; tile: number; w: number; label: string }
+interface Building {
+  id: Exclude<Screen, 'play' | 'dead' | 'intro' | 'ending'>;
+  tile: number; w: number; label: string;
+}
+
+/**
+ * Depth at which the shaft opens into the chamber and the ending takes over.
+ * The world's own hell chamber sits in the last dozen rows; this fires a
+ * little above its ceiling so the sequence starts as you break through.
+ */
+const ENDING_DEPTH_FT = -7250;
 
 const BUILDINGS: Building[] = [
   { id: 'fuel',    tile: 3,  w: 2, label: 'PROPELLANT' },
-  { id: 'sell',    tile: 6,  w: 2, label: 'PROCESSOR' },
-  { id: 'repair',  tile: 12, w: 2, label: 'REPAIR BAY' },
-  { id: 'upgrade', tile: 15, w: 3, label: 'OUTFITTER' },
+  { id: 'sell',    tile: 10, w: 2, label: 'PROCESSOR' },
+  { id: 'repair',  tile: 18, w: 2, label: 'REPAIR BAY' },
+  { id: 'upgrade', tile: 26, w: 3, label: 'OUTFITTER' },
 ];
 
-const CATEGORIES: { key: keyof Pod & string; label: string; list: Upgrade[]; unit: string }[] = [
-  { key: 'drill',    label: 'Drill',    list: DRILLS,    unit: 'ft/s' },
-  { key: 'hull',     label: 'Hull',     list: HULLS,     unit: 'hp' },
-  { key: 'engine',   label: 'Engine',   list: ENGINES,   unit: 'pwr' },
-  { key: 'tank',     label: 'Fuel Tank',list: TANKS,     unit: 'L' },
-  { key: 'radiator', label: 'Radiator', list: RADIATORS, unit: 'x dmg' },
-  { key: 'bay',      label: 'Cargo Bay',list: BAYS,      unit: 'slots' },
+interface Category {
+  key: keyof Pod & string;
+  label: string;
+  list: Upgrade[];
+  unit: string;
+  /** Prefix of the per-tier thumbnails in public/art. */
+  art: string;
+}
+
+const CATEGORIES: Category[] = [
+  { key: 'drill',    label: 'DRILL',     list: DRILLS,    unit: 'ft/s',   art: 'drills' },
+  { key: 'hull',     label: 'HULL',      list: HULLS,     unit: 'hp',     art: 'hulls' },
+  { key: 'engine',   label: 'ENGINE',    list: ENGINES,   unit: 'pwr',    art: 'engines' },
+  { key: 'tank',     label: 'FUEL TANK', list: TANKS,     unit: 'L',      art: 'tanks' },
+  { key: 'radiator', label: 'RADIATOR',  list: RADIATORS, unit: 'x dmg',  art: 'radiators' },
+  { key: 'bay',      label: 'CARGO BAY', list: BAYS,      unit: 'slots',  art: 'bays' },
 ];
 
 const SAVE_KEY = 'tld.save.v1';
@@ -48,11 +70,25 @@ export class Game {
   private log: { text: string; t: number }[] = [];
   private firedTransmissions = new Set<number>();
 
+  private intro: Intro | null = null;
+  private ending: Ending | null = null;
+  /** Persisted so the opening plays once and the ending fires once. */
+  private introSeen = false;
+  private endingSeen = false;
+  private endingChoice: Choice | null = null;
+
   constructor(private ctx: CanvasRenderingContext2D, private input: Input, seed: string) {
     this.world = new World(seed);
+    this.sealShopFoundations();
     this.pod = new Pod(this.world);
     this.renderer = new Renderer(ctx);
     this.load();
+
+    // A fresh save wakes up in the lab. A continued one does not.
+    if (!this.introSeen) {
+      this.intro = new Intro();
+      this.screen = 'intro';
+    }
   }
 
   // ---------------------------------------------------------------- loop
@@ -70,9 +106,41 @@ export class Game {
   }
 
   private fixed(): void {
-    if (this.screen === 'play') this.updatePlay();
+    const step = 1000 / FPS;
+    if (this.screen === 'intro') this.updateIntro(step);
+    else if (this.screen === 'ending') this.updateEnding(step);
+    else if (this.screen === 'play') this.updatePlay();
     else this.updateMenu();
     this.input.endFrame();
+  }
+
+  private updateIntro(step: number): void {
+    this.intro!.update(step, this.input);
+    if (!this.intro!.finished) return;
+    this.intro = null;
+    this.introSeen = true;
+    this.screen = 'play';
+    this.save();
+  }
+
+  /**
+   * The ending returns the player to the surface either way. Refusing is a
+   * statement, not a fail state — and leaving the world playable afterwards
+   * keeps the ambiguity the design asks for about what resumed the shift.
+   */
+  private updateEnding(step: number): void {
+    this.ending!.update(step, this.input);
+    if (!this.ending!.finished) return;
+
+    this.endingChoice = this.ending!.choice;
+    this.ending = null;
+    this.endingSeen = true;
+    this.screen = 'play';
+    this.pod.respawn();
+    this.logLine(this.endingChoice === 'refuse'
+      ? '——: [the band is quiet. something logged the shift anyway.]'
+      : 'FOREMAN: Shift logged. Quota reset. Thank you for your continued service.');
+    this.save();
   }
 
   private updatePlay(): void {
@@ -84,6 +152,14 @@ export class Game {
 
     this.drainEvents();
     this.checkTransmissions();
+
+    // Breaking through into the chamber hands off to the ending.
+    if (!this.endingSeen && this.pod.depthFeet <= ENDING_DEPTH_FT) {
+      this.ending = new Ending();
+      this.screen = 'ending';
+      this.save();
+      return;
+    }
 
     // enter a facility
     const b = this.buildingUnderPod();
@@ -111,8 +187,11 @@ export class Game {
     if (i.justPressed('cancel')) { this.screen = 'play'; this.save(); return; }
 
     if (this.screen === 'upgrade') {
-      if (i.justPressed('down')) this.menuIndex = (this.menuIndex + 1) % CATEGORIES.length;
-      if (i.justPressed('up')) this.menuIndex = (this.menuIndex + CATEGORIES.length - 1) % CATEGORIES.length;
+      const n = CATEGORIES.length;
+      // left/right walk the tab strip; up/down kept as an alias so the old
+      // muscle memory still works
+      if (i.justPressed('right') || i.justPressed('down')) this.menuIndex = (this.menuIndex + 1) % n;
+      if (i.justPressed('left') || i.justPressed('up')) this.menuIndex = (this.menuIndex + n - 1) % n;
       if (i.justPressed('confirm')) this.buyUpgrade(this.menuIndex);
       return;
     }
@@ -172,6 +251,12 @@ export class Game {
 
   private say(text: string): void { this.toast = text; this.toastT = 2600; }
 
+  /** Push a line onto the transmission feed, newest first. */
+  private logLine(text: string): void {
+    this.log.unshift({ text, t: this.time });
+    if (this.log.length > 4) this.log.pop();
+  }
+
   // ---------------------------------------------------------------- events
   private drainEvents(): void {
     for (const e of this.pod.events) {
@@ -195,8 +280,7 @@ export class Game {
       if (this.firedTransmissions.has(i)) continue;
       if (this.pod.maxDepth <= t.depth) {
         this.firedTransmissions.add(i);
-        this.log.unshift({ text: `${t.from}: ${t.text}`, t: this.time });
-        if (this.log.length > 4) this.log.pop();
+        this.logLine(`${t.from}: ${t.text}`);
         break;
       }
     }
@@ -212,6 +296,16 @@ export class Game {
     this.cam.y = Math.max(-120, Math.min(this.world.h * TILE - VIEW_H, this.cam.y));
   }
 
+  /**
+   * Seal the surface row under every building. Without this you can park on
+   * a shop, drill straight down, and drop the whole thing into a hole.
+   */
+  private sealShopFoundations(): void {
+    for (const b of BUILDINGS)
+      for (let tx = b.tile; tx <= b.tile + b.w; tx++)
+        this.world.set(tx, SKY_ROWS, T.FOUNDATION);
+  }
+
   private buildingUnderPod(): Building | null {
     if (this.pod.mode !== 'ground') return null;
     if (this.pod.depthFeet < -30) return null;
@@ -222,6 +316,22 @@ export class Game {
   // ---------------------------------------------------------------- render
   private render(): void {
     const g = this.ctx;
+
+    // The opening and the ending own the whole frame — no world, no HUD.
+    if (this.screen === 'intro') {
+      const anyG = g as unknown as { reset?: () => void };
+      anyG.reset?.();
+      this.intro!.draw(g, this.time);
+      this.intro!.drawTitle(g);
+      return;
+    }
+    if (this.screen === 'ending') {
+      const anyG = g as unknown as { reset?: () => void };
+      anyG.reset?.();
+      this.ending!.draw(g, this.time);
+      return;
+    }
+
     this.renderer.draw(this.world, this.pod, this.cam, this.time);
     this.drawBuildings();
     this.drawHUD();
@@ -329,54 +439,77 @@ export class Game {
     g.restore();
   }
 
-  /** Every menu is a Pip-Boy terminal: metal bezel, phosphor screen. */
+  /**
+   * Shop panels, built the way the original's are: a heavy metal casing with
+   * the vendor's name struck into it, a red close stud in the corner, a
+   * recessed green CRT for the readout, and moulded push-buttons for the
+   * actions rather than bracketed key hints floating in the display.
+   *
+   * The buttons are labelled with the key that works them, so what you see is
+   * what you can actually press — the panel is keyboard-driven, not a mouse
+   * surface dressed up as one.
+   */
   private drawScreen(): void {
     const g = this.ctx;
     g.fillStyle = 'rgba(4,6,4,.72)';
     g.fillRect(0, 0, VIEW_W, VIEW_H);
 
-    const s = bezel(g, 60, 50, VIEW_W - 120, VIEW_H - 100);
+    const px = 46, py = 38, pw = VIEW_W - 92, ph = VIEW_H - 76;
+    const TITLE_H = 40;
+    const s = bezel(g, px, py, pw, ph, TITLE_H);
     const cx = s.x + s.w / 2;
     g.textAlign = 'center';
 
     if (this.screen === 'dead') {
-      glowText(g, 'UNIT OFFLINE', cx, s.y + 150, 30, '#ff6a5a', true);
+      embossed(g, 'UNIT OFFLINE', px + pw / 2, py + 46, 27);
+      closeStud(g, px + pw - 26, py + 26);
       glowText(g, 'The Foreman logs the loss and files a replacement request.',
-        cx, s.y + 192, 13, GREEN_DIM);
-      glowText(g, '[ SPACE ]  REINITIALISE', cx, s.y + 246, 15, GREEN);
+        cx, s.y + 120, 13, GREEN_DIM);
+      button(g, cx - 110, s.y + 168, 220, 44, 'REINITIALISE  [SPACE]', 'red', true);
       g.textAlign = 'left';
       scanlines(g, s);
       return;
     }
 
     const titles: Record<string, string> = {
-      fuel: 'PROPELLANT VENDOR', sell: 'MINERAL PROCESSOR',
-      repair: 'REPAIR BAY', upgrade: 'OUTFITTER',
+      fuel: 'Propellant Vendor 12000', sell: 'Mineral Processor 4400',
+      repair: 'Emendation Station 3500', upgrade: 'AutoBuy 2000',
     };
-    glowText(g, titles[this.screen], cx, s.y + 40, 22, GREEN, true);
-    g.strokeStyle = GREEN_FAINT;
-    g.lineWidth = 2;
-    g.beginPath(); g.moveTo(s.x + 24, s.y + 54); g.lineTo(s.x + s.w - 24, s.y + 54); g.stroke();
-    glowText(g, `CREDITS  $${Math.floor(this.pod.cash).toLocaleString()}`,
-      cx, s.y + 78, 13, GREEN_DIM);
+    embossed(g, titles[this.screen], px + pw / 2, py + 46, 25);
+    closeStud(g, px + pw - 26, py + 26);
+
+    // Credits sit on the casing rather than inside the display, as on the
+    // original's panels — and it keeps them clear of the tab strip.
+    chunky(g, `$${Math.floor(this.pod.cash).toLocaleString()}`,
+      px + 20, py + 50, 24, '#ffe14d', 'left');
 
     if (this.screen === 'upgrade') this.drawUpgrades(s);
     else if (this.screen === 'sell') this.drawSellList(s);
     else if (this.screen === 'fuel') {
       const need = this.pod.maxFuel - this.pod.fuel;
-      glowText(g, `${this.pod.fuel.toFixed(1)} / ${this.pod.maxFuel} L`, cx, s.y + 170, 24);
+      const gx = s.x + 74;
+      glowText(g, 'CURRENT FUEL', gx + 22, s.y + 78, 12, GREEN_DIM);
+      cylinder(g, gx, s.y + 96, 44, 210, this.pod.fuel / this.pod.maxFuel, 'Fuel',
+        ['#7a6231', '#d3b268', '#efdca6']);
+      const rx = (gx + 66 + s.x + s.w) / 2;
+      glowText(g, `${this.pod.fuel.toFixed(1)} / ${this.pod.maxFuel} L`, rx, s.y + 150, 26);
       glowText(g, `REFILL COST  $${Math.round(need * FUEL_PER_L).toLocaleString()}`,
-        cx, s.y + 210, 15, GREEN_DIM);
-      glowText(g, '[ SPACE ]  FILL', cx, s.y + 268, 16);
+        rx, s.y + 186, 15, GREEN_DIM);
+      button(g, rx - 120, s.y + 220, 240, 48, 'FILL TANK  [SPACE]', 'red', need > 0);
     } else if (this.screen === 'repair') {
       const missing = this.pod.maxHp - this.pod.hp;
-      glowText(g, `${Math.ceil(this.pod.hp)} / ${this.pod.maxHp} HP`, cx, s.y + 170, 24);
+      const gx = s.x + 74;
+      glowText(g, 'CURRENT HULL', gx + 22, s.y + 78, 12, GREEN_DIM);
+      cylinder(g, gx, s.y + 96, 44, 210, this.pod.hp / this.pod.maxHp, 'Hull',
+        ['#7d1f24', '#d24a52', '#f28b90']);
+      const rx = (gx + 66 + s.x + s.w) / 2;
+      glowText(g, `${Math.ceil(this.pod.hp)} / ${this.pod.maxHp} HP`, rx, s.y + 150, 26);
       glowText(g, `REPAIR COST  $${(missing * REPAIR_COST).toLocaleString()}`,
-        cx, s.y + 210, 15, GREEN_DIM);
-      glowText(g, '[ SPACE ]  REPAIR', cx, s.y + 268, 16);
+        rx, s.y + 186, 15, GREEN_DIM);
+      button(g, rx - 120, s.y + 220, 240, 48, 'TOTAL REPAIR  [SPACE]', 'green', missing > 0);
     }
 
-    glowText(g, '[ ESC ]  LEAVE', cx, s.y + s.h - 18, 12, GREEN_DIM);
+    glowText(g, '[ ESC ]  LEAVE', cx, s.y + s.h - 14, 12, GREEN_DIM);
     g.textAlign = 'left';
     scanlines(g, s);
   }
@@ -403,48 +536,110 @@ export class Game {
 
     g.textAlign = 'center';
     const cx = s.x + s.w / 2;
-    if (total === 0) glowText(g, 'BAY EMPTY', cx, s.y + 170, 16, GREEN_DIM);
+    if (total === 0) glowText(g, 'BAY EMPTY', cx, s.y + 140, 16, GREEN_DIM);
     else {
       glowText(g, `TOTAL  $${total.toLocaleString()}`, cx, y + 26, 19);
-      glowText(g, '[ SPACE ]  SELL ALL', cx, y + 58, 15);
+      button(g, cx - 110, y + 46, 220, 44, 'SELL ALL  [SPACE]', 'green', true);
     }
   }
 
+  /**
+   * The outfitter, laid out like the original's AutoBuy: a tab strip of
+   * categories across the top, the part you currently own on the left, and
+   * the tiers still ahead of you as a grid of thumbnails on the right.
+   */
   private drawUpgrades(s: { x: number; y: number; w: number; h: number }): void {
     const g = this.ctx;
-    const left = s.x + 46, right = s.x + s.w - 46;
-    let y = s.y + 120;
+    const cat = CATEGORIES[this.menuIndex];
+    const cur = this.pod[cat.key] as unknown as number;
+    const maxed = cur + 1 >= cat.list.length;
+
+    // ---- tab strip
+    const strip = s.w - 52;
+    const tabW = Math.floor(strip / CATEGORIES.length);
+    const tabY = s.y + 10;
+
+    // chevrons instead of a "[LEFT/RIGHT] CATEGORY" line — self-explanatory,
+    // and there is no room at the foot of the panel for another hint
+    g.textAlign = 'center';
+    glowText(g, '‹', s.x + 14, tabY + 19, 20, GREEN);
+    glowText(g, '›', s.x + s.w - 14, tabY + 19, 20, GREEN);
 
     for (let i = 0; i < CATEGORIES.length; i++) {
-      const cat = CATEGORIES[i];
-      const cur = this.pod[cat.key] as unknown as number;
-      const sel = i === this.menuIndex;
-      const maxed = cur + 1 >= cat.list.length;
-      const nxt = maxed ? null : cat.list[cur + 1];
-
-      if (sel) {
-        g.fillStyle = 'rgba(93,255,100,.12)';
-        g.fillRect(left - 24, y - 16, s.w - 44, 26);
-        g.fillStyle = GREEN;
-        g.fillRect(left - 24, y - 16, 3, 26);
-      }
-      g.textAlign = 'left';
-      glowText(g, sel ? '>' : ' ', left - 16, y, 14, GREEN);
-      glowText(g, cat.label, left, y, 14, sel ? GREEN : GREEN_DIM);
-      glowText(g, `${cat.list[cur].name} (${cat.list[cur].value}${cat.unit})`,
-        left + 100, y, 12, GREEN_DIM);
-
-      g.textAlign = 'right';
-      if (maxed) glowText(g, 'MAX', right, y, 13, GREEN_DIM);
-      else {
-        const can = this.pod.cash >= nxt!.price;
-        glowText(g, `${nxt!.name}  $${nxt!.price.toLocaleString()}`, right, y, 13,
-          can ? GREEN : '#b45a4a');
-      }
-      y += 30;
+      const tx = s.x + 26 + i * tabW;
+      const on = i === this.menuIndex;
+      g.fillStyle = on ? 'rgba(93,255,100,.18)' : 'rgba(0,0,0,.35)';
+      g.beginPath(); g.roundRect(tx + 1, tabY, tabW - 2, 26, [5, 5, 0, 0]); g.fill();
+      g.strokeStyle = on ? GREEN : GREEN_FAINT;
+      g.lineWidth = 1;
+      g.beginPath(); g.roundRect(tx + 1.5, tabY + 0.5, tabW - 3, 26, [5, 5, 0, 0]); g.stroke();
+      g.textAlign = 'center';
+      glowText(g, CATEGORIES[i].label, tx + tabW / 2, tabY + 18, 11, on ? GREEN : GREEN_DIM);
     }
+    g.strokeStyle = GREEN;
+    g.beginPath(); g.moveTo(s.x + 26, tabY + 26.5); g.lineTo(s.x + 26 + strip, tabY + 26.5); g.stroke();
+
+    const thumb = (name: string, bx: number, by: number, box: number) => {
+      const a = img(name);
+      if (!a) return false;
+      const k = Math.min(box / a.width, box / a.height);
+      const w = a.width * k, h = a.height * k;
+      g.imageSmoothingEnabled = true;
+      g.drawImage(a, Math.round(bx + (box - w) / 2), Math.round(by + (box - h) / 2),
+        Math.round(w), Math.round(h));
+      g.imageSmoothingEnabled = false;
+      return true;
+    };
+
+    // ---- what you're running now
+    const colX = s.x + 22;
+    const top = tabY + 44;
+    g.textAlign = 'left';
+    glowText(g, 'CURRENT', colX, top, 12, GREEN_DIM);
+    cell(g, colX, top + 8, 96, 96, false);
+    if (!thumb(`part_${cat.art}_${cur}`, colX, top + 8, 96)) {
+      g.textAlign = 'center';
+      glowText(g, '—', colX + 48, top + 62, 24, GREEN_DIM);
+      g.textAlign = 'left';
+    }
+    glowText(g, cat.list[cur].name, colX, top + 126, 12, GREEN);
+    glowText(g, `${cat.list[cur].value}${cat.unit}`, colX, top + 144, 12, GREEN_DIM);
+
+    // ---- the ladder ahead
+    const gx = colX + 130;
+    const box = 72, gap = 12;
+    const perRow = Math.max(1, Math.floor((s.x + s.w - 22 - gx) / (box + gap)));
+    glowText(g, 'AVAILABLE UPGRADES', gx, top, 12, GREEN_DIM);
+
+    if (maxed) {
+      glowText(g, 'FULLY UPGRADED', gx, top + 60, 16, GREEN);
+    } else {
+      for (let t = cur + 1, n = 0; t < cat.list.length; t++, n++) {
+        const bx = gx + (n % perRow) * (box + gap);
+        const by = top + 8 + Math.floor(n / perRow) * (box + 40);
+        const next = t === cur + 1;
+        const can = this.pod.cash >= cat.list[t].price;
+
+        cell(g, bx, by, box, box, next);
+        thumb(`part_${cat.art}_${t}`, bx, by, box);
+        g.textAlign = 'center';
+        glowText(g, `$${cat.list[t].price.toLocaleString()}`, bx + box / 2, by + box + 15, 11,
+          next ? (can ? GREEN : '#b45a4a') : GREEN_DIM);
+        g.textAlign = 'left';
+      }
+    }
+
+    // ---- buy
     g.textAlign = 'center';
-    glowText(g, '[ UP/DOWN ] SELECT     [ SPACE ] BUY', s.x + s.w / 2, y + 22, 13, GREEN_DIM);
+    const cx = s.x + s.w / 2;
+    const by = s.y + s.h - 76;
+    if (!maxed) {
+      const nxt = cat.list[cur + 1];
+      const can = this.pod.cash >= nxt.price;
+      glowText(g, `NEXT  ${nxt.name}   $${nxt.price.toLocaleString()}`, cx, by - 8, 13,
+        can ? GREEN : '#b45a4a');
+      button(g, cx - 110, by, 220, 40, 'BUY  [SPACE]', 'green', can);
+    }
   }
 
   private drawToast(): void {
@@ -471,6 +666,9 @@ export class Game {
       drill: p.drill, hull: p.hull, engine: p.engine, tank: p.tank,
       radiator: p.radiator, bay: p.bay,
       fired: [...this.firedTransmissions],
+      introSeen: this.introSeen,
+      endingSeen: this.endingSeen,
+      endingChoice: this.endingChoice,
     };
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch { /* private mode */ }
   }
@@ -483,13 +681,16 @@ export class Game {
       const d = JSON.parse(raw);
       const p = this.pod;
       Object.assign(p, {
-        cash: d.cash ?? 0, score: d.score ?? 0, maxDepth: d.maxDepth ?? 0,
+        cash: d.cash ?? START_CASH, score: d.score ?? 0, maxDepth: d.maxDepth ?? 0,
         drill: d.drill ?? 0, hull: d.hull ?? 0, engine: d.engine ?? 0,
         tank: d.tank ?? 0, radiator: d.radiator ?? 0, bay: d.bay ?? 0,
       });
       p.hp = Math.min(d.hp ?? p.maxHp, p.maxHp);
       p.fuel = Math.min(d.fuel ?? p.maxFuel, p.maxFuel);
       this.firedTransmissions = new Set(d.fired ?? []);
+      this.introSeen = !!d.introSeen;
+      this.endingSeen = !!d.endingSeen;
+      this.endingChoice = d.endingChoice ?? null;
     } catch { /* corrupt save, start fresh */ }
   }
 

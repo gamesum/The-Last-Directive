@@ -84,6 +84,82 @@ function downscale(src, targetW, targetH) {
   return f;
 }
 
+/** Contiguous runs of set flags, ignoring gaps shorter than `minGap`. */
+function runs(mask, n, minGap = 8) {
+  const out = [];
+  let start = -1, gap = 0;
+  for (let i = 0; i < n; i++) {
+    if (mask[i]) { if (start < 0) start = i; gap = 0; }
+    else if (start >= 0 && ++gap >= minGap) { out.push([start, i - gap]); start = -1; }
+  }
+  if (start >= 0) out.push([start, n - 1]);
+  return out;
+}
+
+/**
+ * Split a chroma-key sheet into its individual subjects, in reading order.
+ *
+ * The image model does NOT reliably honour a requested grid — the same prompt
+ * produced 4x2 for one sheet and 3x3 for another — so slicing at fixed
+ * fractions cut straight through the artwork. This projects the non-magenta
+ * pixels onto each axis instead and finds the real gaps, which works for any
+ * arrangement as long as the subjects don't touch.
+ */
+function splitSheet(img) {
+  const W = img.width, H = img.height;
+  const [c, g] = cv(W, H);
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, W, H).data;
+
+  // Counts as content if it is neither the magenta field nor near-black.
+  // Some sheets come back with black ruled lines drawn between the cells,
+  // which weld every subject into one blob if you count them — the tanks
+  // sheet collapsed to a single 'subject' before this. Item outlines are
+  // near-black too, but their interiors are not, so real subjects survive.
+  const content = (x, y) => {
+    const i = (y * W + x) * 4;
+    const r = d[i], gg = d[i + 1], b = d[i + 2];
+    if (r > 140 && b > 140 && gg < 130 && (r - gg) > 55 && (b - gg) > 55) return false;
+    return Math.max(r, gg, b) > 60;
+  };
+
+  const rowHas = new Uint8Array(H);
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) if (content(x, y)) { rowHas[y] = 1; break; }
+
+  // Give each box a little slack so the subject's own dark outline, which the
+  // projection deliberately ignored, isn't clipped off.
+  const PAD = 4;
+  const out = [];
+  for (const [ry0, ry1] of runs(rowHas, H)) {
+    const y0 = Math.max(0, ry0 - PAD), y1 = Math.min(H - 1, ry1 + PAD);
+    const colHas = new Uint8Array(W);
+    for (let x = 0; x < W; x++)
+      for (let y = y0; y <= y1; y++) if (content(x, y)) { colHas[x] = 1; break; }
+    for (const [rx0, rx1] of runs(colHas, W)) {
+      const x0 = Math.max(0, rx0 - PAD), x1 = Math.min(W - 1, rx1 + PAD);
+      const t = keyAndTrim(img, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+      if (t && t.width > 10 && t.height > 10) out.push(t);
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Drop fragments — slivers left by a subject with a detached part, like the
+ * pipe bridging a twin fuel tank.
+ *
+ * Only worth doing when there are more subjects than tiers. Applied
+ * unconditionally it eats real content: the smallest tank in an ascending
+ * ladder is genuinely tiny, and a blanket size threshold threw it away.
+ */
+function dropFragments(items) {
+  const areas = items.map((c) => c.width * c.height).sort((a, b) => a - b);
+  const median = areas[areas.length >> 1];
+  return items.filter((c) => c.width * c.height >= median * 0.3);
+}
+
 /** Fit inside a box, preserving aspect. */
 function fit(src, boxW, boxH) {
   const s = Math.min(boxW / src.width, boxH / src.height);
@@ -108,6 +184,19 @@ async function run() {
     await save(fit(t, 60, 44), 'pod');
   } catch (e) { log('  FAIL pod: ' + e.message); }
 
+  // ---- the machine in two pieces, so the drill can be aimed independently
+  //      of the hull. Slicing the one-piece sprite always cut through body.
+  for (const [src, name, bw, bh] of [
+    ['machine_body', 'pod_body', 46, 32],
+    ['drill_bit', 'pod_drill', 17, 13],
+  ]) {
+    try {
+      const img = await load(`/art-src/${src}.png`);
+      const t = keyAndTrim(img);
+      await save(fit(t, bw, bh), name);
+    } catch (e) { log(`  FAIL ${name}: ` + e.message); }
+  }
+
   // ---- ore sheet: 4 across, 3 down. Grid order matches MINERALS 0..9.
   try {
     const img = await load('/art-src/ores.png');
@@ -123,6 +212,26 @@ async function run() {
       await save(fit(t, 34, 34), names[i]);
     }
   } catch (e) { log('  FAIL ores: ' + e.message); }
+
+  // ---- upgrade parts: one sheet per category, subjects found by projection
+  //      and taken in reading order, which is the order they ascend in tier.
+  for (const [cat, tiers] of [
+    ['drills', 7], ['hulls', 7], ['engines', 7],
+    ['tanks', 7], ['radiators', 6], ['bays', 6],
+  ]) {
+    try {
+      const img = await load(`/art-src/part_${cat}.png`);
+      let items = splitSheet(img);
+      log(`  part_${cat}: found ${items.length} subjects, need ${tiers}`);
+      if (items.length > tiers) items = dropFragments(items);
+      // If still over, the model drew an extra. The last one it draws is
+      // reliably the most elaborate, so keep that as the top tier.
+      if (items.length > tiers) items = [...items.slice(0, tiers - 1), items[items.length - 1]];
+      if (items.length !== tiers) log(`  WARN part_${cat}: using ${items.length} of ${tiers} tiers`);
+      for (let i = 0; i < Math.min(tiers, items.length); i++)
+        await save(fit(items[i], 54, 54), `part_${cat}_${i}`);
+    } catch (e) { log(`  FAIL part_${cat}: ` + e.message); }
+  }
 
   // ---- surface facilities
   for (const n of ['shop_fuel', 'shop_processor', 'shop_repair', 'shop_outfitter']) {

@@ -122,6 +122,53 @@ thruster nozzles beneath the belly. Weathered, scratched, industrial,
 utilitarian. Looks heavy and slow and well used.`,
   },
 
+  /**
+   * The machine is generated in two pieces so the drill can be aimed at
+   * whatever it is cutting. Slicing a one-piece sprite always cut through
+   * some part of the body; separate art means the hull is never touched.
+   */
+  machine_body: {
+    aspect: '1:1',
+    sprite: true,
+    prompt: `${SPRITE_STYLE} ${CHROMA}
+An armoured mining vehicle hull in strict side view, unmistakably FACING AND
+TRAVELLING TO THE RIGHT, WITH NO DRILL OR DRILL BIT OF ANY KIND.
+
+The silhouette must make the direction obvious at a glance:
+- The RIGHT end is the FRONT. It is lower and wedge-shaped, sloping down and
+  forward like the prow of a bulldozer, and terminates in a small flat round
+  mounting plate ringed with bolt heads where a tool would attach.
+- A rounded armoured cockpit canopy sits high on the FRONT HALF, just behind
+  the prow, with dark angular glass lit faint cyan and a heavy brow visor
+  over it.
+- The LEFT end is the REAR. It is tall, blunt and square, with a raised
+  engine housing, a ribbed radiator grille and two short exhaust stacks
+  pointing up and back.
+- Heavy black caterpillar tracks run the full length along the bottom, with
+  a large drive sprocket at the rear and a smaller idler wheel at the front.
+- Two short bell-mouthed thruster nozzles point straight DOWN from the belly
+  between the tracks. The nozzles are COLD AND SHUT DOWN: bare dark metal
+  bells with nothing coming out of them. No flame, no fire, no exhaust, no
+  jet, no plume, no glow, no sparks, no smoke anywhere in the image.
+
+Olive-drab and dull military green plate armour with visible rivet lines,
+weld seams, scuffed paint and rust streaks. Chunky, heavy, purposeful.
+Absolutely no cone, no auger, no spike, no drill anywhere in the image.`,
+  },
+
+  drill_bit: {
+    aspect: '1:1',
+    sprite: true,
+    prompt: `${SPRITE_STYLE} ${CHROMA}
+A single heavy conical mining drill bit, alone, pointing RIGHT, viewed exactly
+from the side. Polished dark steel cone with deep spiral cutting flutes
+winding around it to a sharp point at the right. A short cylindrical collar
+with bolt heads at the LEFT end where it mounts. Scratched and worn metal,
+cold grey with brown wear staining. Just the drill bit and nothing else — no
+vehicle, no hull, no machine, no background object, no hands, no mount.
+The cone's axis is exactly horizontal and it fills most of the frame.`,
+  },
+
   ores: {
     aspect: '1:1',
     sprite: true,
@@ -135,6 +182,94 @@ pale cyan diamond, luminous turquoise, chalky bone white, dull grey stone.
 Each cluster identical in size and framing, sharp faceted highlights.`,
   },
 };
+
+/**
+ * Upgrade parts, one sheet per category, 4 across by 2 down, read left to
+ * right and top to bottom in ascending tier. Sliced by process.html the same
+ * way the ore sheet is. Described by appearance rather than by the tier names
+ * in spec.ts, since several of those are still placeholders.
+ */
+/**
+ * Laid out as a SINGLE HORIZONTAL ROW rather than a grid.
+ *
+ * A grid was unreliable: asked for 4x2, the model returned 4x2 for one sheet,
+ * 3x3 for another, and ruled black lines between the cells on a third. Worse,
+ * it drew a different number of subjects than asked, so the splitter had to
+ * guess which ones were tiers — and guessing wrong once dropped a middle tier
+ * and once promoted a stray fragment to the top tier. One row of N is easy to
+ * count and easy to split, and leaves nothing to guess.
+ */
+const PART_SHEET = (subject, tiers, count) => ({
+  aspect: '16:9',
+  sprite: true,
+  prompt: `${SPRITE_STYLE} ${CHROMA}
+A SINGLE HORIZONTAL ROW of exactly ${count} ${subject}, side by side in one
+straight line, evenly spaced across the full width of the image, with a clear
+wide band of flat magenta between every neighbouring item so that none of them
+touch or overlap. Exactly ${count} items, no more and no fewer. No grid, no
+frames, no boxes, no dividing lines, no second row.
+Every item is complete, unclipped, the same size, and drawn at the same
+three-quarter angle. Reading LEFT TO RIGHT they ascend in quality, each one
+clearly more elaborate and more valuable than the one before, and NO TWO ARE
+ALIKE:
+${tiers}`,
+});
+
+const PARTS = {
+  part_drills: PART_SHEET('mining drill bits standing upright, point downward', `
+1 a plain worn steel auger, chipped and rusty.
+2 a clean bright silver bit with polished flutes.
+3 a brass and gold bit with an ornate collar.
+4 a bit set with green emerald cutting teeth.
+5 a bit set with deep red ruby cutting teeth.
+6 a bit ringed with brilliant white diamond studs.
+7 an exotic glowing turquoise crystal bit wreathed in faint energy.`, 7),
+
+  part_hulls: PART_SHEET('armour hull plates, each a curved chest-plate section', `
+1 thin dented grey sheet metal with peeling paint.
+2 rough rust-brown iron plate with heavy rivets.
+3 warm bronze plate with a raised ridge.
+4 blue-grey tempered steel plate, clean welds.
+5 pale silvery platinum plate, mirror finish.
+6 dark violet-blue exotic alloy plate with a faint sheen.
+7 a translucent cyan energy shield panel glowing from within.`, 7),
+
+  part_engines: PART_SHEET('automotive engine blocks', `
+1 a small dull grey single-cylinder engine, oil-stained.
+2 a compact four-cylinder block with a red valve cover.
+3 a four-cylinder block with a fat chrome turbocharger.
+4 a larger six-cylinder block with chrome headers.
+5 a big supercharged V8 with a blower sticking out the top.
+6 a huge twelve-cylinder block in deep blue with chrome runners.
+7 a monstrous polished sixteen-cylinder block, gold and chrome.`, 7),
+
+  part_tanks: PART_SHEET('pressurised fuel tanks lying horizontally', `
+1 a tiny scuffed steel canister with hazard stripes.
+2 a medium grey cylinder with a green level window.
+3 a large cream-coloured cylinder with banding straps.
+4 a very large ribbed tank in dull red.
+5 an enormous pale green tank with a glowing level gauge.
+6 a pair of huge linked blue tanks with pressure valves.
+7 a sleek white compression vessel ringed with cryogenic frost.`, 7),
+
+  part_radiators: PART_SHEET('cooling radiator and fan units seen face on', `
+1 a small single grey fan in a plain square housing.
+2 twin grey fans side by side in one housing.
+3 a single large red turbine fan with a chrome ring.
+4 twin blue turbine fans with chrome rings.
+5 a tall finned radiator with a white spiral impeller.
+6 a triple-turbine array with glowing blue coolant tubes.`, 6),
+
+  part_bays: PART_SHEET('open-topped cargo ore bins seen from a high angle', `
+1 a tiny battered steel crate with an orange interior.
+2 a plain grey bin with reinforced corners.
+3 a wide dull red bin with heavy rims.
+4 a very large twin-compartment grey hopper.
+5 an enormous pale industrial hopper with hydraulic rams.
+6 a colossal armoured container with warning markings.`, 6),
+};
+
+for (const [name, spec] of Object.entries(PARTS)) TARGETS[name] = spec;
 
 /** The four surface facilities, generated with a shared house style. */
 const FACILITIES = {

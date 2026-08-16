@@ -13,10 +13,19 @@ export const SCREEN_BG = '#08160a';
 export const MONO = (px: number, bold = false) =>
   `${bold ? '700 ' : ''}${px}px ui-monospace, "Cascadia Mono", Consolas, monospace`;
 
-/** Brushed-metal bezel with a recessed screen cut into it. */
+export interface Rect { x: number; y: number; w: number; h: number }
+
+/**
+ * Brushed-metal bezel with a recessed screen cut into it.
+ *
+ * `titleH` reserves a band of bare metal above the screen for an embossed
+ * header, the way the original's shop panels carry their name across the
+ * casing rather than inside the display.
+ */
 export function bezel(
   g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number,
-): { x: number; y: number; w: number; h: number } {
+  titleH = 0,
+): Rect {
   const pad = 18;
 
   // outer casing
@@ -48,7 +57,7 @@ export function bezel(
   g.beginPath(); g.roundRect(x + 4, y + 4, w - 8, h - 8, 19); g.stroke();
 
   // screen well
-  const sx = x + pad, sy = y + pad, sw = w - pad * 2, sh = h - pad * 2;
+  const sx = x + pad, sy = y + pad + titleH, sw = w - pad * 2, sh = h - pad * 2 - titleH;
   g.fillStyle = '#0b0f0b';
   g.beginPath(); g.roundRect(sx - 4, sy - 4, sw + 8, sh + 8, 16); g.fill();
 
@@ -114,6 +123,116 @@ export function chunky(
   g.fillStyle = fill;
   g.fillText(text, x, y);
   g.restore();
+}
+
+/**
+ * Embossed metal lettering, for panel headers stamped into the casing —
+ * a dark cut above and a light bevel below, so it reads as struck into the
+ * metal rather than printed on it.
+ */
+export function embossed(
+  g: CanvasRenderingContext2D, text: string, x: number, y: number,
+  size: number, align: CanvasTextAlign = 'center',
+): void {
+  g.save();
+  g.textAlign = align;
+  g.font = `700 ${size}px "Trebuchet MS", ui-rounded, system-ui, sans-serif`;
+  g.fillStyle = 'rgba(0,0,0,.55)';
+  g.fillText(text, x, y + 2);
+  g.fillStyle = 'rgba(255,255,255,.30)';
+  g.fillText(text, x, y - 1);
+  const face = g.createLinearGradient(0, y - size, 0, y + 4);
+  face.addColorStop(0, '#f2efe6');
+  face.addColorStop(0.5, '#bfbcb1');
+  face.addColorStop(1, '#8e8b81');
+  g.fillStyle = face;
+  g.fillText(text, x, y);
+  g.restore();
+}
+
+export type BtnHue = 'red' | 'green' | 'steel';
+
+/** [face top, face bottom, housing rim, label ink] */
+const BTN: Record<BtnHue, [string, string, string, string]> = {
+  red:   ['#a8383a', '#6d2224', '#2a1112', '#1c0c0c'],
+  green: ['#2f7a3c', '#174f22', '#0d2a12', '#d8ffd8'],
+  steel: ['#7f7d74', '#4f4d46', '#26251f', '#0e0e0c'],
+};
+
+/**
+ * A physical push button with a moulded bevel, as on the original's vendor
+ * panels. `active` lights it, for the option the keyboard is pointing at.
+ */
+export function button(
+  g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number,
+  label: string, hue: BtnHue = 'red', active = false,
+): void {
+  const [top, bot, rim, ink] = BTN[hue];
+
+  // recessed housing the button sits in
+  g.fillStyle = rim;
+  g.beginPath(); g.roundRect(x - 4, y - 4, w + 8, h + 8, 7); g.fill();
+  g.strokeStyle = 'rgba(255,255,255,.16)';
+  g.lineWidth = 1;
+  g.beginPath(); g.roundRect(x - 4, y - 4, w + 8, h + 8, 7); g.stroke();
+
+  const face = g.createLinearGradient(0, y, 0, y + h);
+  face.addColorStop(0, active ? '#e0e0d0' : top);
+  face.addColorStop(1, active ? top : bot);
+  g.fillStyle = face;
+  g.beginPath(); g.roundRect(x, y, w, h, 4); g.fill();
+
+  // bevel: light along the top, shadow along the bottom
+  g.strokeStyle = 'rgba(255,255,255,.35)';
+  g.beginPath(); g.moveTo(x + 2, y + 1); g.lineTo(x + w - 2, y + 1); g.stroke();
+  g.strokeStyle = 'rgba(0,0,0,.45)';
+  g.beginPath(); g.moveTo(x + 2, y + h - 1); g.lineTo(x + w - 2, y + h - 1); g.stroke();
+
+  g.save();
+  g.textAlign = 'center';
+  g.font = `700 ${Math.min(17, Math.round(h * 0.46))}px "Trebuchet MS", ui-rounded, system-ui, sans-serif`;
+  g.fillStyle = active ? '#10140f' : ink;
+  g.fillText(label, x + w / 2, y + h / 2 + Math.round(h * 0.17));
+  g.restore();
+}
+
+/** Dotted-border item cell, as around the original's upgrade thumbnails. */
+export function cell(
+  g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number,
+  active = false,
+): void {
+  g.save();
+  g.fillStyle = active ? 'rgba(93,255,100,.14)' : 'rgba(93,255,100,.05)';
+  g.fillRect(x, y, w, h);
+  g.setLineDash([3, 3]);
+  g.lineWidth = 1;
+  g.strokeStyle = active ? GREEN : GREEN_FAINT;
+  g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  g.restore();
+}
+
+/** The red close stud in the panel's top-right corner. */
+export function closeStud(
+  g: CanvasRenderingContext2D, cx: number, cy: number, r = 13,
+): void {
+  const face = g.createRadialGradient(cx - r * 0.35, cy - r * 0.4, 1, cx, cy, r);
+  face.addColorStop(0, '#e4746a');
+  face.addColorStop(1, '#8e1f1c');
+  g.fillStyle = face;
+  g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = 'rgba(0,0,0,.6)';
+  g.lineWidth = 2;
+  g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.stroke();
+
+  g.strokeStyle = '#f6e6e2';
+  g.lineWidth = 3;
+  g.lineCap = 'round';
+  const d = r * 0.45;
+  g.beginPath();
+  g.moveTo(cx - d, cy - d); g.lineTo(cx + d, cy + d);
+  g.moveTo(cx + d, cy - d); g.lineTo(cx - d, cy + d);
+  g.stroke();
+  g.lineCap = 'butt';
 }
 
 /** Vertical cylinder gauge, as on the original's HUD. */

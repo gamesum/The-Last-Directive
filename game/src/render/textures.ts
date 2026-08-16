@@ -1,73 +1,113 @@
 import { Rng } from '../core/rng';
-import { img } from './assets';
-import { TILE, MINERALS, T, isOre, isRock, isLava } from '../data/spec';
-
-/** How many ore sprites the generated sheet supplies (ids 0..9). */
-const ORE_SPRITES = 10;
+import { TILE, MINERALS, EARTH_H } from '../data/spec';
 
 /**
- * Drop a generated sprite into a tile, jittered a little so neighbouring
- * tiles of the same ore don't line up into an obvious grid.
- */
-function stamp(
-  g: CanvasRenderingContext2D, sprite: HTMLImageElement | null, r: Rng, scale: number,
-): void {
-  if (!sprite) return;
-  const w = sprite.width * scale, h = sprite.height * scale;
-  const x = (TILE - w) / 2 + (r.next() * 8 - 4);
-  const y = (TILE - h) / 2 + (r.next() * 8 - 4);
-  const sm = g.imageSmoothingEnabled;
-  g.imageSmoothingEnabled = true;
-  g.drawImage(sprite, Math.round(x), Math.round(y), Math.round(w), Math.round(h));
-  g.imageSmoothingEnabled = sm;
-}
-
-/**
- * Procedural pixel-art tile textures.
+ * Procedural pixel-art terrain.
  *
- * Look target: the original's warm, bright, "homey" underground — fine
- * reddish-brown speckled soil, fully lit at every depth, with excavated
- * tunnels showing as olive-green rounded corridors. Deliberately NOT a
- * dark atmospheric cave game.
+ * Look target, taken from the original's own screenshots:
+ *
+ *  - The soil is ONE continuous field of fine, low-contrast noise. It does not
+ *    tile per-cell; there are no grid seams anywhere. Its colour barely moves
+ *    over the whole descent — the dirt at -37ft and at -1850ft is nearly the
+ *    same brown.
+ *  - The excavated space carries the depth gradient instead: a warm tan at the
+ *    surface, sliding through khaki to a deep olive-green by ~2000ft and to
+ *    near-black at the bottom. That separation — static blocks, moving
+ *    background — is what makes the descent read.
+ *  - Ore, rock and lava are shapes *embedded in* the soil, with the soil
+ *    running continuously around and behind them. They are not tiles.
  *
  * All original. Nothing here derives from the extracted reference art.
  */
 
-const PX = 2;                 // art-pixel size -> 25x25 logical grid per tile
-const GRID = TILE / PX;
+const PX = 2;                  // art-pixel size
+const GRID = TILE / PX;        // 25 art-pixels per tile edge
 
 /**
- * Soil palettes by depth stratum: [base, dark, light, accent].
- * The drift from top to bottom is deliberately gentle — the original stays
- * recognisably brown for most of the descent and only turns cold near Hell.
+ * The soil is drawn as windows into a large tiling sheet, so neighbouring
+ * cells are continuous. The sheet is a whole number of tiles wide, which is
+ * what makes the window arithmetic line up exactly.
  */
-const STRATA: [string, string, string, string][] = [
-  ['#7a4a33', '#5a3524', '#94614a', '#6a3f2b'],
-  ['#74462f', '#553122', '#8e5c45', '#653b28'],
-  ['#6e4230', '#502e21', '#885843', '#603826'],
-  ['#684030', '#4b2c20', '#825440', '#5b3524'],
-  ['#5f3d31', '#452a21', '#79503f', '#533223'],
-  ['#563a33', '#3e2822', '#6e4b3e', '#4a2f26'],
-  ['#4a3630', '#342422', '#5f4239', '#3f2a24'],
-  ['#3b2e2c', '#28201f', '#4c3a35', '#31241f'],
-];
+const SHEET_TILES = 6;
+const SHEET = TILE * SHEET_TILES;
 
-/** Excavated-tunnel green, per stratum. The original's signature colour. */
-const CAVITY = [
-  '#4e5c28', '#4a5726', '#455024', '#3f4922',
-  '#39421f', '#333b1c', '#2d3419', '#252b15',
-];
+/** How many depth steps the palettes are sampled into. */
+export const SUB = 24;
 
-export const BANDS = STRATA.length;
+// ---------------------------------------------------------------- colour
+const clamp01 = (n: number) => Math.max(0, Math.min(1, n));
 
-export function bandForRow(y: number, worldH: number): number {
-  return Math.min(BANDS - 1, Math.floor((y / worldH) * BANDS));
+type RGB = [number, number, number];
+
+function mix(a: RGB, b: RGB, k: number): RGB {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * k),
+    Math.round(a[1] + (b[1] - a[1]) * k),
+    Math.round(a[2] + (b[2] - a[2]) * k),
+  ];
 }
 
-export function cavityColor(band: number): string {
-  return CAVITY[Math.max(0, Math.min(CAVITY.length - 1, band))];
+const css = (c: RGB, alpha = 1) =>
+  alpha >= 1 ? `rgb(${c[0]},${c[1]},${c[2]})` : `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
+
+/** Sample a [stop, colour] ramp at t in 0..1. */
+function ramp(stops: [number, RGB][], t: number): RGB {
+  t = clamp01(t);
+  if (t <= stops[0][0]) return stops[0][1];
+  for (let i = 1; i < stops.length; i++) {
+    if (t > stops[i][0]) continue;
+    const [t0, c0] = stops[i - 1];
+    const [t1, c1] = stops[i];
+    return mix(c0, c1, t1 === t0 ? 0 : (t - t0) / (t1 - t0));
+  }
+  return stops[stops.length - 1][1];
 }
 
+/**
+ * Soil base colour. Deliberately almost flat — the original's dirt stays the
+ * same reddish brown for nearly the whole game and only cools right at the
+ * bottom. Depth is communicated by the excavated space, not by this.
+ */
+const SOIL: [number, RGB][] = [
+  [0.00, [122, 78, 54]],
+  [0.30, [116, 73, 50]],
+  [0.60, [104, 66, 47]],
+  [0.82, [ 84, 56, 44]],
+  [1.00, [ 54, 40, 38]],
+];
+
+/**
+ * Excavated space. This is the gradient: warm tan just under the outpost,
+ * khaki, then the olive-green the original is remembered for, then dark.
+ */
+const CAVITY: [number, RGB][] = [
+  [0.00, [176, 150, 104]],
+  [0.06, [150, 132,  86]],
+  [0.14, [108, 110,  60]],
+  [0.25, [ 62,  74,  38]],
+  [0.45, [ 48,  58,  32]],
+  [0.65, [ 36,  44,  26]],
+  [0.85, [ 26,  32,  20]],
+  [1.00, [ 16,  20,  14]],
+];
+
+/** Depth step for a world row, 0..SUB-1. */
+export function subForRow(y: number, worldH = EARTH_H): number {
+  return Math.max(0, Math.min(SUB - 1, Math.round((y / worldH) * (SUB - 1))));
+}
+
+/**
+ * Excavated-space colour at a world y in pixels.
+ *
+ * Sampled continuously rather than per depth band, because the background is
+ * poured into the cavity mask as one screen-space gradient — it has to be a
+ * smooth function of depth or a seam appears wherever bands would meet.
+ */
+export function cavityColorAtY(worldY: number): string {
+  return css(ramp(CAVITY, worldY / (EARTH_H * TILE)));
+}
+
+// ---------------------------------------------------------------- canvases
 const cache = new Map<string, HTMLCanvasElement>();
 
 function make(w = TILE, h = TILE): [HTMLCanvasElement, CanvasRenderingContext2D] {
@@ -80,143 +120,259 @@ function make(w = TILE, h = TILE): [HTMLCanvasElement, CanvasRenderingContext2D]
 
 function px(g: CanvasRenderingContext2D, x: number, y: number, color: string): void {
   g.fillStyle = color;
-  g.fillRect(x * PX, y * PX, PX, PX);
+  g.fillRect(Math.round(x) * PX, Math.round(y) * PX, PX, PX);
 }
 
-/** Dense fine speckle — the original soil reads as noisy grain, not blobs. */
-function drawDirt(g: CanvasRenderingContext2D, r: Rng, band: number): void {
-  const [base, dark, light, accent] = STRATA[band];
-  g.fillStyle = base;
-  g.fillRect(0, 0, TILE, TILE);
+// ---------------------------------------------------------------- soil
+/**
+ * One tiling sheet of soil per depth step. Because every cell reads a window
+ * out of this by world coordinate, adjacent cells are genuinely continuous —
+ * the grid disappears, which is the single biggest difference between this
+ * and a per-tile texture.
+ */
+function soilSheet(sub: number): HTMLCanvasElement {
+  const key = `soil|${sub}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
 
-  for (let y = 0; y < GRID; y++) {
-    for (let x = 0; x < GRID; x++) {
-      const n = r.next();
-      if (n < 0.26) px(g, x, y, dark);
-      else if (n < 0.48) px(g, x, y, light);
-      else if (n < 0.62) px(g, x, y, accent);
+  const [c, g] = make(SHEET, SHEET);
+  const t = sub / (SUB - 1);
+  const base = ramp(SOIL, t);
+  const dark = mix(base, [0, 0, 0], 0.34);
+  const light = mix(base, [255, 226, 190], 0.30);
+  const accent = mix(base, [40, 16, 10], 0.22);
+
+  g.fillStyle = css(base);
+  g.fillRect(0, 0, SHEET, SHEET);
+
+  // Fine, dense, low-contrast grain. The original's dirt is noisy at the
+  // pixel level and almost featureless above it.
+  const r = new Rng(`soil-grain-${sub}`);
+  const n = SHEET / PX;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const v = r.next();
+      if (v < 0.28) px(g, x, y, css(dark));
+      else if (v < 0.50) px(g, x, y, css(light));
+      else if (v < 0.64) px(g, x, y, css(accent));
+    }
+  }
+
+  // A few very soft large-scale patches so the field isn't perfectly uniform
+  // at a distance. Drawn nine times so they wrap across the sheet edges.
+  for (let i = 0; i < 18; i++) {
+    const bx = r.next() * SHEET;
+    const by = r.next() * SHEET;
+    const rad = 26 + r.next() * 54;
+    const col = r.next() < 0.5 ? dark : light;
+    for (let ox = -1; ox <= 1; ox++) {
+      for (let oy = -1; oy <= 1; oy++) {
+        const gx = bx + ox * SHEET, gy = by + oy * SHEET;
+        if (gx < -rad || gx > SHEET + rad || gy < -rad || gy > SHEET + rad) continue;
+        const grd = g.createRadialGradient(gx, gy, 0, gx, gy, rad);
+        grd.addColorStop(0, css(col, 0.14));
+        grd.addColorStop(1, css(col, 0));
+        g.fillStyle = grd;
+        g.fillRect(gx - rad, gy - rad, rad * 2, rad * 2);
+      }
+    }
+  }
+
+  cache.set(key, c);
+  return c;
+}
+
+/** Blit the soil window belonging to world cell (tx,ty) at screen (sx,sy). */
+export function drawSoil(
+  g: CanvasRenderingContext2D, tx: number, ty: number, sx: number, sy: number, sub: number,
+): void {
+  const sheet = soilSheet(sub);
+  const u = (((tx % SHEET_TILES) + SHEET_TILES) % SHEET_TILES) * TILE;
+  const v = (((ty % SHEET_TILES) + SHEET_TILES) % SHEET_TILES) * TILE;
+  g.drawImage(sheet, u, v, TILE, TILE, sx, sy, TILE, TILE);
+}
+
+// ---------------------------------------------------------------- inclusions
+/**
+ * Angular shards, the shape language the original uses for every embedded
+ * material — ore, lava and the pale streaks alike. Flat-shaded with a dark
+ * seat underneath so they sit in the soil rather than on it.
+ */
+function shards(
+  g: CanvasRenderingContext2D, r: Rng,
+  body: string, edge: string, count: number, spread: number,
+): void {
+  for (let i = 0; i < count; i++) {
+    const cx = GRID / 2 + (r.next() * 2 - 1) * spread;
+    const cy = GRID / 2 + (r.next() * 2 - 1) * spread;
+    const len = 4 + r.int(5);
+    const lean = (r.next() * 2 - 1) * 0.5;
+
+    for (let s = 0; s < len; s++) {
+      // taper to a point at both ends
+      const k = 1 - Math.abs(s - (len - 1) / 2) / ((len - 1) / 2 || 1);
+      const w = Math.max(0, Math.round(k * 2));
+      const x = cx + lean * s;
+      const y = cy + s - len / 2;
+      for (let d = -w - 1; d <= w + 1; d++) px(g, x + d, y, 'rgba(0,0,0,.40)');
+      for (let d = -w; d <= w; d++) px(g, x + d, y, body);
+      if (w > 0) px(g, x - w, y, edge);
     }
   }
 }
 
 /**
- * Ore reads as a cluster of angular crystal shards sitting in the soil,
- * which is far more legible in motion than a soft blob.
+ * Ore as it appears IN the ground: embedded shards of the mineral's colour,
+ * with the soil continuing around them. Deliberately not the same art as the
+ * inventory icon — the generated sprites read as objects sitting on top of
+ * the dirt, which is exactly what we don't want here.
  */
-function drawOre(g: CanvasRenderingContext2D, r: Rng, id: number): void {
+export function oreOverlay(id: number, variant: number): HTMLCanvasElement {
+  const key = `ore|${id}|${variant}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+
+  const [c, g] = make();
+  const r = new Rng(key);
   const m = MINERALS[id];
-  if (!m) return;
+  const body = m ? m.color : '#cccccc';
 
-  const shards = 3 + r.int(3);
-  for (let i = 0; i < shards; i++) {
-    const cx = 5 + r.int(GRID - 10);
-    const cy = 5 + r.int(GRID - 10);
-    const len = 3 + r.int(4);
-    const lean = r.int(3) - 1;
+  shards(g, r, body, '#ffffff', 3 + r.int(3), 5);
 
-    // dark seat so the shard separates from the soil
-    for (let s = -1; s <= len; s++) {
-      const w = s === -1 || s === len ? 1 : 2;
-      for (let d = -w - 1; d <= w + 1; d++)
-        px(g, cx + d + lean * s * 0.3, cy + s - len / 2, 'rgba(0,0,0,.5)');
-    }
-    // shard body, tapering at both ends
-    for (let s = 0; s < len; s++) {
-      const t = 1 - Math.abs(s - (len - 1) / 2) / ((len - 1) / 2 || 1);
-      const w = Math.max(0, Math.round(t * 2));
-      for (let d = -w; d <= w; d++)
-        px(g, cx + d + lean * s * 0.3, cy + s - len / 2, m.color);
-    }
-    // specular edge
-    px(g, cx - 1 + lean * 0.3, cy - Math.floor(len / 2) + 1, '#ffffff');
-  }
-}
-
-function drawRock(g: CanvasRenderingContext2D, r: Rng): void {
-  g.fillStyle = '#8d8b86';
-  g.fillRect(0, 0, TILE, TILE);
-  for (let y = 0; y < GRID; y++)
-    for (let x = 0; x < GRID; x++) {
-      const n = r.next();
-      if (n < 0.26) px(g, x, y, '#6e6c68');
-      else if (n < 0.46) px(g, x, y, '#a5a39d');
-      else if (n < 0.54) px(g, x, y, '#57554f');
-    }
-  // heavy rounded shading so boulders read as solid and immovable
-  const grd = g.createRadialGradient(TILE * 0.35, TILE * 0.3, 2, TILE * 0.5, TILE * 0.5, TILE * 0.8);
-  grd.addColorStop(0, 'rgba(255,255,255,.18)');
-  grd.addColorStop(1, 'rgba(0,0,0,.42)');
-  g.fillStyle = grd;
-  g.fillRect(0, 0, TILE, TILE);
-}
-
-function drawLava(g: CanvasRenderingContext2D, r: Rng): void {
-  g.fillStyle = '#5e1f12';
-  g.fillRect(0, 0, TILE, TILE);
-  for (let y = 0; y < GRID; y++)
-    for (let x = 0; x < GRID; x++) {
-      const n = r.next();
-      if (n < 0.30) px(g, x, y, '#8f3416');
-      else if (n < 0.50) px(g, x, y, '#d2601f');
-      else if (n < 0.60) px(g, x, y, '#f7a838');
-      else if (n < 0.64) px(g, x, y, '#ffd98a');
-    }
-}
-
-function drawGas(g: CanvasRenderingContext2D, r: Rng, band: number): void {
-  drawDirt(g, r, band);
+  // loose flecks bedded into the surrounding soil, so the deposit reads as a
+  // seam running through the rock rather than a single lump
   for (let i = 0; i < 6; i++) {
-    const cx = 3 + r.int(GRID - 6), cy = 3 + r.int(GRID - 6), rad = 2 + r.int(2);
-    for (let y = -rad; y <= rad; y++)
-      for (let x = -rad; x <= rad; x++)
-        if (x * x + y * y <= rad * rad && r.next() < 0.6)
-          px(g, cx + x, cy + y, '#9fbf5e');
+    const fx = 2 + r.int(GRID - 4), fy = 2 + r.int(GRID - 4);
+    px(g, fx, fy + 1, 'rgba(0,0,0,.4)');
+    px(g, fx, fy, body);
   }
+
+  cache.set(key, c);
+  return c;
 }
 
-function drawBedrock(g: CanvasRenderingContext2D, r: Rng): void {
-  g.fillStyle = '#2a2026';
-  g.fillRect(0, 0, TILE, TILE);
-  for (let y = 0; y < GRID; y++)
-    for (let x = 0; x < GRID; x++) {
-      const n = r.next();
-      if (n < 0.2) px(g, x, y, '#3a2c34');
-      else if (n < 0.3) px(g, x, y, '#1c151a');
-    }
-}
-
-export function tileTexture(code: number, variant: number, band: number): HTMLCanvasElement {
-  const key = `${code}|${variant}|${band}`;
+/** Grey boulders: lumpy, rounded, clearly a different material to the soil. */
+export function rockOverlay(variant: number): HTMLCanvasElement {
+  const key = `rock|${variant}`;
   const hit = cache.get(key);
   if (hit) return hit;
 
   const [c, g] = make();
   const r = new Rng(key);
 
-  if (code === T.BEDROCK || code <= -8) drawBedrock(g, r);
-  else if (isRock(code)) { drawRock(g, r); stamp(g, img('rock_0'), r, 0.9); }
-  else if (isLava(code)) drawLava(g, r);
-  else if (code === T.GAS) drawGas(g, r, band);
-  else if (isOre(code)) {
-    drawDirt(g, r, band);
-    const id = code - 6;
-    const sprite = img(id < ORE_SPRITES ? `ore_${id}` : 'artifact_0');
-    if (sprite) stamp(g, sprite, r, 0.78);
-    else drawOre(g, r, id);
-  } else drawDirt(g, r, band);
+  // irregular rounded mass, built from overlapping discs so the silhouette is
+  // lumpy rather than a rounded square
+  const mass = new Path2D();
+  const cx = TILE / 2 + (r.next() * 6 - 3);
+  const cy = TILE / 2 + (r.next() * 6 - 3);
+  mass.arc(cx, cy, 15 + r.next() * 3, 0, Math.PI * 2);
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2 + r.next();
+    const d = 7 + r.next() * 5;
+    mass.moveTo(cx + Math.cos(a) * d + 9, cy + Math.sin(a) * d);
+    mass.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, 8 + r.next() * 3, 0, Math.PI * 2);
+  }
+
+  g.fillStyle = 'rgba(0,0,0,.45)';
+  g.save();
+  g.translate(1, 2);
+  g.fill(mass);                       // contact shadow, offset down-right
+  g.restore();
+
+  g.fillStyle = '#8d8b86';
+  g.fill(mass);
+
+  // speckle and shading, confined to the boulder
+  g.save();
+  g.clip(mass);
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      const v = r.next();
+      if (v < 0.24) px(g, x, y, '#6e6c68');
+      else if (v < 0.42) px(g, x, y, '#a5a39d');
+      else if (v < 0.49) px(g, x, y, '#57554f');
+    }
+  }
+  const grd = g.createRadialGradient(cx - 6, cy - 7, 2, cx, cy, 24);
+  grd.addColorStop(0, 'rgba(255,255,255,.22)');
+  grd.addColorStop(1, 'rgba(0,0,0,.45)');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, TILE, TILE);
+  g.restore();
 
   cache.set(key, c);
   return c;
 }
 
-/** Surface ground band — grassless dusty crust with a darker topsoil line. */
+/** Lava: the same embedded-shard language, glowing. */
+export function lavaOverlay(variant: number): HTMLCanvasElement {
+  const key = `lava|${variant}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+
+  const [c, g] = make();
+  const r = new Rng(key);
+
+  shards(g, r, '#d2601f', '#ffd98a', 4 + r.int(3), 6);
+  // a warm bloom over the whole cell so it reads as hot
+  const grd = g.createRadialGradient(TILE / 2, TILE / 2, 3, TILE / 2, TILE / 2, 24);
+  grd.addColorStop(0, 'rgba(255,150,50,.30)');
+  grd.addColorStop(1, 'rgba(255,120,30,0)');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, TILE, TILE);
+
+  cache.set(key, c);
+  return c;
+}
+
+/** Gas pocket: sickly green haze bedded into the soil. */
+export function gasOverlay(variant: number): HTMLCanvasElement {
+  const key = `gas|${variant}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+
+  const [c, g] = make();
+  const r = new Rng(key);
+  for (let i = 0; i < 5; i++) {
+    const cx = 8 + r.next() * (TILE - 16);
+    const cy = 8 + r.next() * (TILE - 16);
+    const rad = 7 + r.next() * 9;
+    const grd = g.createRadialGradient(cx, cy, 1, cx, cy, rad);
+    grd.addColorStop(0, 'rgba(168,208,96,.62)');
+    grd.addColorStop(1, 'rgba(140,180,80,0)');
+    g.fillStyle = grd;
+    g.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+  }
+  cache.set(key, c);
+  return c;
+}
+
+export function bedrockTile(variant: number): HTMLCanvasElement {
+  const key = `bedrock|${variant}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+
+  const [c, g] = make();
+  const r = new Rng(key);
+  g.fillStyle = '#2a2026';
+  g.fillRect(0, 0, TILE, TILE);
+  for (let y = 0; y < GRID; y++)
+    for (let x = 0; x < GRID; x++) {
+      const v = r.next();
+      if (v < 0.2) px(g, x, y, '#3a2c34');
+      else if (v < 0.3) px(g, x, y, '#1c151a');
+    }
+  cache.set(key, c);
+  return c;
+}
+
+/** Surface crust — dusty topsoil with a darker skin, matching the outpost. */
 export function surfaceTexture(): HTMLCanvasElement {
   const key = 'surface-ground';
   const hit = cache.get(key);
   if (hit) return hit;
   const [c, g] = make();
-  const r = new Rng('surface-ground');
-  drawDirt(g, r, 0);
+  g.drawImage(soilSheet(0), 0, 0, TILE, TILE, 0, 0, TILE, TILE);
   g.fillStyle = '#4a2c1c';
   g.fillRect(0, 0, TILE, 6);
   g.fillStyle = '#96674a';
@@ -225,14 +381,10 @@ export function surfaceTexture(): HTMLCanvasElement {
   return c;
 }
 
+// ---------------------------------------------------------------- the pod
 /**
- * The pod: stubby olive-drab tracked digger with a conical drill bit.
- * Chunky, high-contrast, readable at a glance against brown soil.
- */
-/**
- * Drill bit palettes, one per tier: [dark, mid, light].
- * Each tier is coloured as the mineral it's named after — the same trick the
- * original uses, and it makes an upgrade instantly legible on screen.
+ * Drill palettes, one per tier: coloured as the mineral each is named after,
+ * so an upgrade is legible the moment you leave the shop.
  */
 const DRILL_COLORS: [string, string, string][] = [
   ['#7d7b75', '#b9b7b0', '#efeee9'], // Stock      — plain steel
@@ -256,123 +408,208 @@ const HULL_COLORS: [string, string, string, string][] = [
 ];
 
 /**
- * Recolour the generated machine per upgrade tier.
+ * The pod, split into a hull and a separate drill head.
  *
- * The art is authored facing right with the drill on the front third, so the
- * hull tint is masked to the rear ~62% and the drill tint to the front ~38%.
- * `source-atop` keeps the tint inside the sprite's own alpha, and the low
- * opacity preserves the original shading and rivet detail underneath.
+ * The original swaps between distinct sprites for driving, flying and digging
+ * down or sideways, so the drill always points at what it is cutting. Keeping
+ * the drill as its own piece lets us do the same with one set of art: the
+ * renderer pivots it about `seam` to aim it.
+ *
+ * Everything here is authored facing RIGHT. The renderer mirrors.
  */
-function podFromArt(
-  art: HTMLImageElement, facing: 1 | -1, drill: number, hull: number,
-): HTMLCanvasElement {
-  const w = art.width, h = art.height;
-  const [c, g] = make(w, h);
-
-  g.imageSmoothingEnabled = true;
-  g.drawImage(art, 0, 0, w, h);
-
-  const split = Math.round(w * 0.62);
-  g.globalCompositeOperation = 'source-atop';
-
-  if (hull > 0) {
-    g.globalAlpha = 0.16 + hull * 0.045;          // up to ~0.43 at tier 6
-    g.fillStyle = HULL_COLORS[Math.min(hull, 6)][1];
-    g.fillRect(0, 0, split, h);
-  }
-  if (drill > 0) {
-    g.globalAlpha = 0.3 + drill * 0.06;           // drills read strongly
-    g.fillStyle = DRILL_COLORS[Math.min(drill, 6)][1];
-    g.fillRect(split, 0, w - split, h);
-  }
-
-  g.globalAlpha = 1;
-  g.globalCompositeOperation = 'source-over';
-
-  if (facing === 1) return c;
-
-  // mirror for the other heading
-  const [m, mg] = make(w, h);
-  mg.imageSmoothingEnabled = true;
-  mg.translate(w, 0);
-  mg.scale(-1, 1);
-  mg.drawImage(c, 0, 0);
-  return m;
+export interface PodParts {
+  /** Hull, drawn at (-w/2, -h/2) in pod-centred coords. */
+  body: HTMLCanvasElement;
+  /** Drill head, drawn at (0, -drillMidY) after translating to the pivot. */
+  drill: HTMLCanvasElement;
+  w: number;
+  h: number;
+  /** x of the hull/drill seam within the full sprite — the drill's pivot. */
+  seam: number;
+  /**
+   * Vertical centre of the drill. When the head swings under the machine its
+   * sprite-space y becomes screen-space x, so pivoting about the canvas
+   * centre would throw it off to one side; this keeps the bit on the axis it
+   * is cutting along.
+   */
+  drillMidY: number;
+  /** Thruster mouths in pod-centred coords, so the flame starts at the bell. */
+  nozzles: { x: number; y: number }[];
 }
 
-export function podSprite(
-  facing: 1 | -1, drill = 0, hull = 0, engine = 0,
-): HTMLCanvasElement {
-  const key = `pod|${facing}|${drill}|${hull}|${engine}`;
-  const hit = cache.get(key);
-  if (hit) return hit;
+/**
+ * Machine geometry, in game pixels.
+ *
+ * BODY_H matches the collision box height exactly (2 * COLLIDE_HH). Get this
+ * wrong and the machine visibly floats: the box rests on the ground while the
+ * shorter sprite hangs above it, leaving a gap under the tracks.
+ */
+const BODY_W = 34;
+const BODY_H = 34;
+/** The bit overlaps the mounting plate slightly, so there is no visible join. */
+const SEAM = BODY_W - 2;
+/** Vertical centre of the mounting plate, and so of the bit. */
+const MOUNT_Y = 17;
+/** Belly gap between the two track bogies, where the thrusters hang. */
+const NOZZLE_X = [10, 18];
+const NOZZLE_TOP = 22;
+const NOZZLE_BOTTOM = 31;
 
-  const art = img('pod');
-  if (art) {
-    const built = podFromArt(art, facing, drill, hull);
-    cache.set(key, built);
-    return built;
-  }
+/**
+ * The machine, drawn in code one game pixel at a time.
+ *
+ * This was generated art for a while and it did not work. The image models
+ * produce a detailed 1024px illustration *of* pixel art; the machine is drawn
+ * at ~44px across, and everything that made the illustration good — rivets,
+ * grilles, panel lines — turned to mush on the way down. The belly nozzles
+ * came out about two pixels tall, which is why there was visibly nothing for
+ * the thrusters to fire from. Generated art still does the job for the ore
+ * and upgrade thumbnails, because those are shown at 54px where the detail
+ * survives. At machine scale, hand-placed pixels win.
+ *
+ * Authored facing RIGHT; the renderer mirrors. The hull and the bit are built
+ * as separate canvases so the bit can be aimed without touching the hull.
+ */
+function buildMachine(drill: number, hull: number, engine: number): PodParts {
+  const [hShadow, hBody, hLight, hTrim] = HULL_COLORS[Math.min(hull, 6)];
+  const [dShadow, dBody, dLight] = DRILL_COLORS[Math.min(drill, 6)];
 
-  const S = 2, W = 28, H = 20;
-  const [c, g] = make(W * S, H * S);
-
-  const put = (x: number, y: number, w: number, h: number, col: string) => {
+  const [body, g] = make(BODY_W, BODY_H);
+  const r = (x: number, y: number, w: number, h: number, col: string) => {
     g.fillStyle = col;
-    const X = facing === 1 ? x : W - x - w;
-    g.fillRect(X * S, y * S, w * S, h * S);
+    g.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
   };
 
-  const [dShadow, dBody, dLight] = DRILL_COLORS[Math.min(drill, 6)];
-  const [hShadow, hBody, hLight, hTrim] = HULL_COLORS[Math.min(hull, 6)];
+  const OUTLINE = '#151a0d';
 
-  // ---- drill: longer and blockier with tier, coloured by its mineral
-  const dLen = 2 + Math.ceil(drill / 2);          // 2..5 segments
-  let dx = 19;
-  for (let i = 0; i < dLen; i++) {
-    const inset = Math.min(3, i);
-    put(dx, 7 + inset, 2, Math.max(2, 6 - inset * 2), i === 0 ? dShadow : dBody);
-    dx += 2;
-  }
-  put(dx - 2, 9, 2, 2, dLight);                    // bright tip
-  put(19, 6, 2, 1, dLight);                        // collar highlight
-  put(19, 13, 2, 1, dShadow);
+  // ---- chassis skirt, laid down first so everything else sits on it
+  r(2, 20, 30, 5, hShadow);
+  r(2, 24, 30, 1, OUTLINE);
 
-  // ---- hull
-  put(3, 6, 16, 9, hBody);
-  put(3, 6, 16, 2, hLight);
-  put(3, 13, 16, 2, hShadow);
-  put(2, 8, 1, 5, hShadow);
+  // ---- rear engine block: grille and exhaust stacks, so the back reads as
+  //      the back at a glance and the machine never looks reversed
+  r(1, 7, 11, 14, hBody);
+  r(1, 7, 11, 2, hLight);
+  r(1, 19, 11, 2, hShadow);
+  r(0, 9, 1, 11, OUTLINE);                     // rear bumper edge
+  r(2, 10, 8, 8, '#20261a');
+  for (let i = 0; i < 4; i++) r(3, 11 + i * 2, 6, 1, hShadow);
 
-  // extra bolted armour plates appear as the hull tier climbs
-  if (hull >= 2) { put(4, 8, 3, 5, hLight); put(4, 8, 3, 1, hTrim); }
-  if (hull >= 4) { put(8, 12, 9, 2, hTrim); }
-  if (hull >= 6) {                                  // energy shield shimmer
-    put(2, 5, 18, 1, '#a8dcf5');
-    put(2, 15, 18, 1, '#7ab6d8');
+  const stacks = engine >= 4 ? 3 : 2;          // bigger engines vent harder
+  for (let i = 0; i < stacks; i++) {
+    r(3 + i * 3, 2 + i, 2, 6 - i, hShadow);
+    r(3 + i * 3, 1 + i, 2, 1, '#17170f');
   }
 
-  // ---- cockpit
-  put(11, 8, 6, 4, '#232a17');
-  put(12, 9, 4, 2, '#5fa8c4');
-  put(12, 9, 2, 1, '#bfe9f5');
+  // ---- main hull
+  r(12, 8, 12, 13, hBody);
+  r(12, 8, 12, 2, hLight);
+  r(12, 19, 12, 2, hShadow);
+  r(12, 15, 12, 1, hShadow);                   // panel seam breaks up the mass
+  if (hull >= 2) { r(13, 11, 5, 7, hLight); r(13, 11, 5, 1, hTrim); }
+  if (hull >= 4) for (let i = 0; i < 5; i++) r(14 + i * 2, 17, 1, 1, hTrim);
 
-  put(5, 9, 1, 1, hTrim);
-  put(7, 9, 1, 1, hTrim);
+  // ---- canopy, up front where the driver would sit
+  r(17, 3, 10, 6, OUTLINE);
+  r(18, 4, 8, 4, '#2f7f94');
+  r(18, 4, 5, 2, '#6fd8e8');
+  r(17, 2, 11, 1, hTrim);                      // brow visor
 
-  // ---- treads
-  put(2, 15, 17, 4, '#33372a');
-  for (let i = 0; i < 5; i++) put(3 + i * 3, 16, 2, 2, '#5a5f47');
-  put(2, 15, 17, 1, '#6e735a');
+  // ---- sloped prow, stepped down to the mounting plate
+  for (let i = 0; i < 8; i++) {
+    const yTop = 8 + Math.floor(i * 0.85);
+    r(24 + i, yTop, 1, 21 - yTop, hBody);
+    r(24 + i, yTop, 1, 1, hLight);
+  }
+  r(31, MOUNT_Y - 3, 3, 6, hShadow);
+  r(31, MOUNT_Y - 3, 3, 1, hTrim);
 
-  // ---- thrusters grow with engine tier
-  const nozzle = 2 + Math.floor(engine / 3);        // 2..4 wide
-  const nozzleCol = engine >= 5 ? '#d8c48a' : engine >= 3 ? '#b0b4a0' : '#8a8f78';
-  put(5, 19, nozzle, 1, nozzleCol);
-  put(12, 19, nozzle, 1, nozzleCol);
+  if (hull >= 6) { r(1, 6, 27, 1, '#a8dcf5'); r(2, 25, 30, 1, '#7ab6d8'); }
 
-  cache.set(key, c);
-  return c;
+  // ---- tracks, as two short bogies with a wide gap between them. The gap is
+  //      the whole point: it is where the thrusters live, in clear air.
+  const bogie = (bx: number, bw: number) => {
+    r(bx, 25, bw, 9, '#191b16');
+    r(bx, 25, bw, 1, '#3b4034');
+    for (let i = 0; i + 3 <= bw - 1; i += 3) r(bx + 1 + i, 27, 2, 4, '#3a3f31');
+    for (let i = 0; i < bw; i += 3) r(bx + i, 32, 2, 1, '#33372c');
+    r(bx, 33, bw, 1, OUTLINE);
+  };
+  bogie(1, 8);
+  bogie(24, 9);
+
+  // ---- thruster bells, hanging in the gap between the bogies
+  const mouth = 5 + (engine >= 3 ? 1 : 0);
+  const bellH = 5;
+  for (const nx of NOZZLE_X) {
+    r(nx + 1, NOZZLE_TOP, 3, NOZZLE_BOTTOM - bellH - NOZZLE_TOP, '#4c5142');
+    r(nx, NOZZLE_BOTTOM - bellH, mouth, bellH, '#5c6152');
+    r(nx, NOZZLE_BOTTOM - bellH, mouth, 1, '#7e8570');       // rim catches light
+    r(nx, NOZZLE_BOTTOM - 1, mouth, 1, '#241f18');           // dark mouth
+    r(nx - 1, NOZZLE_BOTTOM - bellH, 1, bellH, OUTLINE);
+    r(nx + mouth, NOZZLE_BOTTOM - bellH, 1, bellH, OUTLINE);
+  }
+
+  // ---- the bit, on its own canvas so it can be pivoted
+  const bitLen = 11 + Math.ceil(drill / 2);
+  const bitW = bitLen + 3;
+  const [bit, bg] = make(bitW, BODY_H);
+  const br = (x: number, y: number, w: number, h: number, col: string) => {
+    bg.fillStyle = col;
+    bg.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+  };
+
+  const midY = MOUNT_Y;
+  const BIT_OUTLINE = '#12100c';
+
+  const halfAt = (i: number) => Math.max(1, Math.round(5 - (i / bitLen) * 4));
+
+  // collar
+  br(0, midY - 5, 3, 10, dShadow);
+  br(0, midY - 5, 3, 1, dLight);
+  br(0, midY + 4, 3, 1, BIT_OUTLINE);
+
+  // cone: dark underside, lighter top, one bright lit edge, hard silhouette
+  for (let i = 0; i < bitLen; i++) {
+    const half = halfAt(i);
+    br(3 + i, midY - half - 1, 1, 1, BIT_OUTLINE);
+    br(3 + i, midY + half, 1, 1, BIT_OUTLINE);
+    br(3 + i, midY - half, 1, half * 2, dShadow);
+    br(3 + i, midY - half, 1, half, dBody);
+    br(3 + i, midY - half, 1, 1, dLight);
+  }
+
+  // spiral flutes: diagonal bands, kept strictly inside the silhouette so no
+  // stray pixels escape where the cone has narrowed to a point
+  for (let band = 0; band < 3; band++) {
+    for (let i = 1; i < bitLen; i++) {
+      const half = halfAt(i);
+      const y = midY - half + 1 + ((i + band * 4) % 6);
+      if (y > midY - half && y < midY + half) br(3 + i, y, 1, 1, dShadow);
+    }
+  }
+
+  return {
+    body,
+    drill: bit,
+    w: SEAM + bitW,
+    h: BODY_H,
+    seam: SEAM,
+    drillMidY: midY,
+    nozzles: NOZZLE_X.map((nx) => ({
+      x: nx + mouth / 2 - (SEAM + bitW) / 2,
+      y: NOZZLE_BOTTOM - BODY_H / 2,
+    })),
+  };
+}
+
+const podCache = new Map<string, PodParts>();
+
+export function podParts(drill = 0, hull = 0, engine = 0): PodParts {
+  const key = `${drill}|${hull}|${engine}`;
+  let hit = podCache.get(key);
+  if (!hit) podCache.set(key, hit = buildMachine(drill, hull, engine));
+  return hit;
 }
 
 /**

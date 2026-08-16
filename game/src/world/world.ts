@@ -1,7 +1,7 @@
 import { Rng } from '../core/rng';
 import {
   EARTH_W, EARTH_H, SKY_ROWS, MINERAL_RATE, TILE, PX_PER_FOOT, POD_HH,
-  T, isSolid, isDrillable,
+  T, isSolid, isDrillable, hollowDiv,
 } from '../data/spec';
 
 /**
@@ -120,9 +120,10 @@ export class World {
       }
     }
 
-    // The original hollows out a third of everything, last. This is the
-    // single most important line for how the world reads while flying.
-    if (r.int(3) === 0) c = T.EMPTY;
+    // The hollow-out pass, applied last to every tile. The original uses a
+    // flat random(3), which leaves the whole crust cavernous; hollowDiv()
+    // ramps it with depth instead. See the tuning block in spec.ts.
+    if (r.int(hollowDiv(y, H)) === 0) c = T.EMPTY;
     return c;
   }
 

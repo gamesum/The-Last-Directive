@@ -43,6 +43,69 @@ export const REPAIR_COST = 15;      // [ffdec] $ per HP
 export const XVEL_EPS = 0.12;
 export const YVEL_EPS = 0.07;
 
+// ---------------------------------------------------------------- tuning
+/**
+ * DELIBERATE DEVIATIONS from the original, kept together so they are easy to
+ * find and revert. Everything outside this block is measured, not chosen.
+ *
+ * Speed: the original caps horizontal travel at enginePower/10, which is
+ * 15px/frame on the stock engine rising to 21 on the best — only a 40%
+ * spread, so the engine ladder reads as pointless until the bay is heavy
+ * enough for mass to matter. Subtracting a flat offset makes stock notably
+ * slower and widens the spread to 10 -> 16, so every tier is felt at once.
+ * Set both offsets to 0 for the original's exact numbers. [tuned]
+ */
+export const SPEED_CAP_OFFSET = 5;
+export const LIFT_CAP_OFFSET = 3.5;
+export const speedCap = (power: number) => Math.max(2, power / 10 - SPEED_CAP_OFFSET);
+export const liftCap = (power: number) => Math.max(2, power / 12 - LIFT_CAP_OFFSET);
+
+/**
+ * World density: the original hollows out `random(3) == 0` of every tile —
+ * a full third — which leaves connected caverns wide enough to fly through
+ * for long stretches without ever drilling. These divisors make the crust
+ * solid near the surface and open up gradually with depth, so caverns become
+ * something you descend into rather than the default state of the world.
+ * Set both to 3 for the original's exact generation. [tuned]
+ */
+export const HOLLOW_DIV_SURFACE = 8;
+export const HOLLOW_DIV_DEEP = 4;
+
+/**
+ * Corner forgiveness. The machine is 40px inside 50px tiles, so threading a
+ * one-tile gap squarely is fiddly. When only one of the two leading corners
+ * catches, and it only just catches, the pod slides clear instead of stopping
+ * dead — the collision box behaves as though its corners were rounded off.
+ * FORGIVE is how deep an overlap still counts as a clip; SLIDE caps how far
+ * it can be nudged in a single frame so it stays imperceptible. [tuned]
+ */
+export const CORNER_FORGIVE = 19;
+export const CORNER_SLIDE = 6;
+
+/**
+ * Shrink of the collision box relative to the drawn machine, per side. The
+ * measured box is 40px inside 50px tiles, leaving 5px of clearance each side
+ * to fly a one-tile shaft — tighter than anyone can steer. Pulling each edge
+ * in widens that to 8px without the machine visibly sinking into rock.
+ * 0 restores the original's exact box. [tuned]
+ */
+export const COLLIDE_INSET = 3;
+export const COLLIDE_HW = POD_HW - COLLIDE_INSET;
+export const COLLIDE_HH = POD_HH - COLLIDE_INSET;
+
+/**
+ * Frames a direction must be held against diggable ground before the drill
+ * engages, so brushing a wall while manoeuvring doesn't commit you to a
+ * shaft. ~0.17s at 42fps. 0 restores the original's instant bite. [tuned]
+ */
+export const DIG_HOLD_FRAMES = 7;
+
+/** Chance denominator for the hollow-out pass at world row `y`. */
+export function hollowDiv(y: number, worldH: number): number {
+  const t = Math.max(0, Math.min(1, y / worldH));
+  return Math.round(HOLLOW_DIV_SURFACE + (HOLLOW_DIV_DEEP - HOLLOW_DIV_SURFACE) * t);
+}
+
 // ---------------------------------------------------------------- upgrades
 export interface Upgrade { name: string; price: number; value: number }
 
@@ -125,6 +188,8 @@ export const T = {
   GAS: 31,                         // hitGasPocket()
   HELL_AIR: -999,
   BEDROCK: -8,
+  /** Sealed ground under a surface building. Reads as surface, never digs. */
+  FOUNDATION: -3,
 } as const;
 
 export const isOre = (c: number) => c >= T.ORE_MIN && c <= T.ARTIFACT_MAX;
@@ -132,8 +197,13 @@ export const isDirt = (c: number) => c >= T.DIRT_MIN && c <= T.DIRT_MAX;
 export const isRock = (c: number) => c >= T.ROCK_MIN && c <= T.ROCK_MAX;
 export const isLava = (c: number) => c >= T.LAVA_MIN && c <= T.LAVA_MAX;
 export const isSolid = (c: number) => c !== T.EMPTY && c !== T.HELL_AIR;
-/** Bedrock and the hell-chamber shell can't be drilled. [est] */
-export const isDrillable = (c: number) => isSolid(c) && c !== T.BEDROCK && c > -9;
+/**
+ * [ffdec] startDigging() gates on `earth[x][y][0] > -3`, so every code at or
+ * below -3 is structural and undiggable: bedrock, the hell-chamber shell, and
+ * the sealed ground under the surface buildings. Only the plain surface rows
+ * (-1, -2) can be cut.
+ */
+export const isDrillable = (c: number) => isSolid(c) && c > T.FOUNDATION;
 
 /** Hard rock drills slower. The original's exact factor wasn't read. [est] */
 export const ROCK_DIG_FACTOR = 0.35;
@@ -150,6 +220,13 @@ export function gasDamage(depthFt: number, radiatorMult: number): number {
 
 // ---------------------------------------------------------------- fuel
 export const FUEL_PER_L = 3;        // [est] price per litre at the pump
+
+/**
+ * Starting credits. The original drops you in at $0 with a part-full tank,
+ * which reads as hostile before you understand the loop — you can strand
+ * yourself before your first sale. Enough to fill from empty. [tuned]
+ */
+export const START_CASH = 30;
 /**
  * Per-frame burn is enginePower divided by these. [ffdec]
  * IDLE is unconditional — it ticks every frame the pod is alive, which is

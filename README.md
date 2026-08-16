@@ -19,6 +19,10 @@ Arrows or WASD to move. Hold a direction against soil to drill. Space at a
 surface building to enter it, Esc to leave. `?wipe=1` clears the save,
 `?seed=name` generates a different world.
 
+A fresh save opens in the laboratory; Esc skips it. Reaching the chamber at
+the bottom of the shaft plays the ending. Both are stored in the save, so
+they each happen once — use `?wipe=1` to see them again.
+
 ```bash
 npm run build --prefix game     # production build -> game/dist
 ```
@@ -30,6 +34,8 @@ npm run build --prefix game     # production build -> game/dist
 | `game/src/data/spec.ts` | Every extracted constant, single source of truth |
 | `game/src/world/world.ts` | Port of the original's `generateEarth()` |
 | `game/src/game/pod.ts` | Physics, digging, cargo, damage |
+| `game/src/game/intro.ts` | The opening — checklist doubles as the tutorial |
+| `game/src/game/ending.ts` | The chamber, the directive, the choice |
 | `game/src/render/` | Procedural tile textures, renderer, generated-art loader |
 | `game/src/ui/crt.ts` | Pip-Boy UI chrome (bezel, phosphor, scanlines) |
 | `game/tools/genart.mjs` | Background/sprite generation via Gemini |
